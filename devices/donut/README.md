@@ -71,10 +71,10 @@ a USB cable soldered to those pads. How to open the case: the guides linked unde
 [XDA thread][xda].
 
 > [!TIP]
-> **3D printable solderless options are possible** ([issue #127][i127]):
+> **Community made 3D printable solderless options:**
 >
-> - Pogo pins: [Echo Dot 3 (donut) Pogo Pin Holder for TM3 / TM4 / TM5](https://www.printables.com/model/1904685-echo-dot-3-donut-pogo-pin-holder-for-tm3-tm4-tm5-s) (Printables)
-> - Wires only: [Echo Dot 3 USB jig](https://makerworld.com/cs/models/3551062-echo-dot-3-usb-jig) (MakerWorld)
+> - Pogo pins: [Echo Dot 3 (donut) Pogo Pin Holder for TM3 / TM4 / TM5](https://www.printables.com/model/1904685-echo-dot-3-donut-pogo-pin-holder-for-tm3-tm4-tm5-s) (Printables), by [dosdroid](https://github.com/dosdroid)
+> - Wires only: [Echo Dot 3 USB jig](https://makerworld.com/cs/models/3551062-echo-dot-3-usb-jig) (MakerWorld), by [gabrielebu](https://github.com/gabrielebu)
 
 | USB cable wire | Pad on the Echo's board |
 |---|---|
@@ -297,4 +297,3 @@ Assistant does not tell the Echo which language its assistant uses, so this cann
 
 [xda]: https://xdaforums.com/t/unlock-root-twrp-unbrick-amazon-echo-dot-3rd-gen-2018-donut.4801400/
 [i112]: https://github.com/Gamer92000/echo-dot-assist/issues/112
-[i127]: https://github.com/Gamer92000/echo-dot-assist/issues/127
