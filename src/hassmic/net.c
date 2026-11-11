@@ -76,6 +76,60 @@ static unsigned parse_answer(const uint8_t *m, size_t len, const char *name)
 /* Sent from a port other than 5353, so responders answer by unicast to it (RFC 6762 5.1, 6.7) and the avahi-daemon that
  * owns 5353 on the Echo is not in the way.  Not an ephemeral port: those start at 32768, and the stock firewall admits
  * inbound UDP on 16384-32767 only.  The query goes out on every IPv4 interface: multicast has no route to follow. */
+/* The SRV record of `name` in a response: its port, 0 if none */
+static int parse_srv(const uint8_t *m, size_t len, const char *name)
+{
+    char rn[256]; size_t off = 12;
+    if (len < 12 || !(m[2] & 0x80)) return 0;
+    unsigned qd = m[4] << 8 | m[5], rr = (m[6] << 8 | m[7]) + (m[8] << 8 | m[9]) + (m[10] << 8 | m[11]);
+    for (unsigned i = 0; i < qd; i++) { if (get_name(m, len, &off, rn, sizeof rn)) return 0; off += 4; }
+    for (unsigned i = 0; i < rr; i++) {
+        if (get_name(m, len, &off, rn, sizeof rn) || off + 10 > len) return 0;
+        unsigned type = m[off] << 8 | m[off + 1], cls = (m[off + 2] << 8 | m[off + 3]) & 0x7fff, rdlen = m[off + 8] << 8 | m[off + 9];
+        off += 10;
+        if (off + rdlen > len) return 0;
+        if (type == 33 && cls == 1 && rdlen >= 7 && !strcasecmp(rn, name)) return m[off + 4] << 8 | m[off + 5];
+        off += rdlen;
+    }
+    return 0;
+}
+
+int mdns_srv_port(const char *instance, unsigned host)
+{
+    char name[256]; uint8_t q[300], r[1500]; int port = 0;
+    snprintf(name, sizeof name, "%s", instance);
+    size_t nl = strlen(name); if (nl && name[nl - 1] == '.') name[nl - 1] = 0;
+    memset(q, 0, 12); q[1] = 0x43; q[5] = 1;
+    int l = put_name(q + 12, sizeof q - 16, name);
+    if (l < 0) return 0;
+    size_t qlen = 12 + l;
+    q[qlen++] = 0; q[qlen++] = 33;                                              /* type SRV */
+    q[qlen++] = 0x80; q[qlen++] = 1;                                            /* class IN, unicast response wanted */
+    int s = socket(AF_INET, SOCK_DGRAM, 0), bound = 0;
+    if (s < 0) return 0;
+    struct sockaddr_in me = { .sin_family = AF_INET };
+    for (int i = 0; i < 20 && !bound; i++) {                                    /* answers come to this port: the firewall's range */
+        me.sin_port = htons(16384 + ((unsigned)getpid() * 7919u + 31u + i * 104729u) % 16384);
+        bound = !bind(s, (struct sockaddr *)&me, sizeof me);
+    }
+    if (!bound) { close(s); return 0; }
+    unsigned char ttl = 255; setsockopt(s, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof ttl);
+    struct sockaddr_in to = { .sin_family = AF_INET, .sin_port = htons(5353) }, one = to;
+    inet_pton(AF_INET, "224.0.0.251", &to.sin_addr); one.sin_addr.s_addr = host;
+    static const int wait_ms[] = { 250, 500, 1000 };
+    for (int round = 0; round < 3 && !port; round++) {
+        if (host) sendto(s, q, qlen, 0, (struct sockaddr *)&one, sizeof one);
+        if (!host || round) sendto(s, q, qlen, 0, (struct sockaddr *)&to, sizeof to);
+        struct pollfd pfd = { .fd = s, .events = POLLIN };
+        while (!port && poll(&pfd, 1, wait_ms[round]) > 0) {
+            ssize_t n = recv(s, r, sizeof r, 0);
+            if (n > 0) port = parse_srv(r, n, name);
+        }
+    }
+    close(s);
+    return port;
+}
+
 unsigned mdns_resolve4(const char *host)
 {
     char name[256]; uint8_t q[300], r[1500]; unsigned addr = 0;

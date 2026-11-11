@@ -12,4 +12,8 @@ int net_socket(int family, int type, int protocol);
 
 /* IPv4 address of a ".local" name by one-shot mDNS query (RFC 6762 5.1), in network byte order; 0 if nobody answered. */
 unsigned mdns_resolve4(const char *name);
+/* The port of a service instance ("iTunes_Ctrl_<id>._dacp._tcp.local": its SRV record) by one-shot mDNS query, asked of
+ * `host` itself (IPv4, network byte order; RFC 6762 5.5: responders answer what is sent to them directly) and of the
+ * network; 0 if nobody answered. */
+int mdns_srv_port(const char *instance, unsigned host);
 #endif

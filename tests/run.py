@@ -42,6 +42,7 @@ TESTS = [
     ("wakealign", [PY, "tests/fake_ha_wakealign.py"]),
     ("sendspin", [PY, "tests/fake_ma_sendspin.py"]),
     ("sendspin-9", [PY, "tests/fake_ma_sendspin.py", "--legacy"]),
+    ("airplay", [PY, "tests/fake_airplay.py"]),
     ("wifi", [PY, "tests/fake_web_wifi.py"]),
     ("wifi-join", [PY, "tests/fake_wifi_join.py"]),
     ("volumes", [PY, "tests/fake_ha_volumes.py"]),
@@ -78,8 +79,10 @@ RETRY_MAX = 4           # more failing at once than load makes (at most 2 a run 
 
 def netns(argv):
     """argv in a network namespace of its own with lo up, as the caller's uid again; multicast on it for zeroconf
-    (aiosendspin, avahi stand-ins), which fails without an interface that takes the mDNS group (ENODEV)"""
-    inner = "ip link set lo multicast on up && ip route add 224.0.0.0/4 dev lo && exec unshare -U --map-user=%d --map-group=%d \"$@\"" % (os.getuid(), os.getgid())
+    (aiosendspin, avahi stand-ins), which fails without an interface that takes the mDNS group (ENODEV).  A veth
+    pair, left down, for its MAC address: Shairport Sync (tests/fake_airplay.py) makes its AirPlay id of the first
+    interface that has one and waits 10 s for it; where none can be made the test is only that much slower"""
+    inner = "ip link set lo multicast on up && ip route add 224.0.0.0/4 dev lo && { ip link add hm0 type veth peer name hm1 2>/dev/null; exec unshare -U --map-user=%d --map-group=%d \"$@\"; }" % (os.getuid(), os.getgid())
     return ["unshare", "-rn", "sh", "-c", inner, "sh", *argv]
 
 

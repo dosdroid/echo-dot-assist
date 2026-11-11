@@ -69,6 +69,7 @@
 #include "core.h"
 #include "ota.h"
 #include "sendspin.h"
+#include "airplay.h"
 #include "sounds.h"
 #include "sound.h"
 #include "whisper.h"
@@ -955,7 +956,7 @@ void core_dropin(int st, const char *peer, int outgoing)
     /* A call is the newest source, as Alexa's paused what played: music's leftovers in micAsr would open the gate and go
      * to the other side.  No resume afterwards, as between the music sources; a phone without remote control was only
      * made silent and is heard again.  Outside core_lock: sendspin takes its own lock */
-    if (st == DROPIN_LIVE && was != DROPIN_LIVE) { if (core_sendspin_port) sendspin_pause(); a2dp_pause(); }
+    if (st == DROPIN_LIVE && was != DROPIN_LIVE) { if (core_sendspin_port) sendspin_pause(); a2dp_pause(); airplay_pause(); }
     if (st == DROPIN_IDLE && was == DROPIN_LIVE) a2dp_unyield();
 }
 
@@ -1282,7 +1283,7 @@ static void trigger(int touch, uint64_t from)
 static long long music_stopped_ms;                  /* core_lock: when a stop last paused music */
 static int music_stop(void)
 {
-    int paused = (core_sendspin_port && sendspin_stop()) | a2dp_stop();     /* both: one may not have heard it yet */
+    int paused = (core_sendspin_port && sendspin_stop()) | a2dp_stop() | airplay_stop();     /* all: one may not have heard it yet */
     if (paused) music_stopped_ms = mono_ms();
     return paused;
 }
@@ -2437,17 +2438,24 @@ int core_timer_stop_any(int set)
 
 /* The newest music source wins: a Bluetooth device that starts pauses the Sendspin group (the controller role; the
  * whole group, since a player cannot tell whether it has the group to itself), a Sendspin stream that starts pauses the
- * Bluetooth device (AVRCP; without it the device only goes unheard until Sendspin stops).  No automatic resume. */
+ * Bluetooth device (AVRCP; without it the device only goes unheard until Sendspin stops), and either does an AirPlay
+ * sender, which does both (airplay.c: silent here at once, the sender asked by DACP).  No automatic resume. */
 void core_music(int source, int on)
 {
     int was = on ? atomic_fetch_or(&music_on, source) : atomic_fetch_and(&music_on, ~source);
     if (on && !(was & source)) {
-        if (source == MUSIC_BLUETOOTH && was & MUSIC_SENDSPIN && core_sendspin_port) sendspin_pause();
-        if (source == MUSIC_SENDSPIN && was & MUSIC_BLUETOOTH) a2dp_pause();
+        if (source != MUSIC_SENDSPIN && was & MUSIC_SENDSPIN && core_sendspin_port) sendspin_pause();
+        if (source != MUSIC_BLUETOOTH && was & MUSIC_BLUETOOTH) a2dp_pause();
+        if (source != MUSIC_AIRPLAY && was & MUSIC_AIRPLAY) airplay_pause();
     }
-    if (!on && source == MUSIC_SENDSPIN && was & MUSIC_SENDSPIN) a2dp_unyield();
+    if (!on && source != MUSIC_BLUETOOTH && was & source) a2dp_unyield();
     if (!was != !atomic_load(&music_on)) playback_hint();
 }
+
+/* Sendspin and AirPlay play on the one music output (audio.h music_*): the backends keep a single stream */
+static atomic_int music_owner;
+int core_music_claim(int source) { int none = 0; return atomic_compare_exchange_strong(&music_owner, &none, source) || none == source; }
+void core_music_release(int source) { int mine = source; atomic_compare_exchange_strong(&music_owner, &mine, 0); }
 
 #define SOUND_TO_MIC (CAP_RATE * 85 / 1000)         /* speaker to mic stream (2026-09-30) */
 static void sound_start(void)                       /* earcon thread: a sound goes to the mixer */
@@ -2615,7 +2623,9 @@ static void on_action(void)
     pthread_mutex_lock(&core_lock);
     int busy = state == LISTENING || state == THINKING;
     pthread_mutex_unlock(&core_lock);
-    if (!busy && (a2dp_button(0) || (core_sendspin_port && sendspin_button()) || a2dp_button(1))) return;
+    /* what plays is paused first (an AirPlay sender before Sendspin, whose button also starts an idle group), then
+     * what the Echo paused resumed */
+    if (!busy && (a2dp_button(0) || airplay_button(0) || (core_sendspin_port && sendspin_button()) || a2dp_button(1) || airplay_button(1))) return;
     atomic_store(&trigger_pending, 2);                  /* 2: touch */
 }
 
@@ -2632,7 +2642,7 @@ static void on_multi(int n)
     pthread_mutex_unlock(&core_lock);
     /* a Drop In in any state (a call ringing here included) is the single press's to answer or end, never a skip */
     int call = dropin_running() && dropin_status(NULL, 0) != DROPIN_IDLE;
-    if (!busy && !call && (a2dp_skip(dir) || (core_sendspin_port && sendspin_skip(dir)))) return;
+    if (!busy && !call && (a2dp_skip(dir) || airplay_skip(dir) || (core_sendspin_port && sendspin_skip(dir)))) return;
     on_action();
 }
 
@@ -2947,6 +2957,7 @@ void core_speaker(int mode, int pct)
         if (connected && proto->volume_changed) proto->volume_changed(volume);
         if (core_sendspin_port) sendspin_volume_changed(volume);
         a2dp_volume_changed(volume);
+        airplay_volume_changed(volume);
     }
     pthread_mutex_unlock(&core_lock);
 }
@@ -2974,6 +2985,7 @@ void core_set_volume(int v)
     if (connected && proto->volume_changed) proto->volume_changed(volume);
     if (core_sendspin_port) sendspin_volume_changed(volume);
     a2dp_volume_changed(volume);
+    airplay_volume_changed(volume);
 }
 
 /* Speaker equalizer: the mixer's own user EQ (libasp "ASP/UserEq"), which stock set from the Alexa app through PuffinApp.
@@ -3140,6 +3152,7 @@ static void volume_sync(void)
             if (connected && proto->volume_changed) proto->volume_changed(volume);
             if (core_sendspin_port) sendspin_volume_changed(volume);
             a2dp_volume_changed(volume);
+            airplay_volume_changed(volume);
         } else if (main_v != want) {                                /* the loudest of three: ours again */
             fprintf(stderr, "volume: MainVolume %d changed outside, %d again (%s)\n", main_v, want, vol_split ? "separate volumes" : "even steps");
             main_written = -1;
@@ -3439,6 +3452,8 @@ static void on_winch(int s) { (void)s; atomic_store(&pair_pending, 1); }
 
 int main(int argc, char **argv)
 {
+    /* Shairport Sync's mDNS publisher is a link to this binary (airplay.c): nothing of the satellite starts for it */
+    { const char *b = strrchr(argv[0], '/'); if (!strcmp(b ? b + 1 : argv[0], "avahi-publish-service")) return airplay_publish(argc, argv); }
     const char *manifest = NULL, *input = board.keypad; int port = 0, print_mdns = 0, o;
     micgain_init(&mic_gain, MICGAIN_LEVEL);            /* until the protocol has its saved settings (Wyoming: always) */
     while ((o = getopt(argc, argv, "P:p:n:w:m:b:z:o:a:i:W:G:LEVSTB")) != -1) switch (o) {
@@ -3538,6 +3553,7 @@ int main(int argc, char **argv)
     if (use_bt) improv_start(&improv_hooks);                 /* setup over Bluetooth, when there is no network (improv.c) */
     if (ota_port) ota_start(ota_port);
     pthread_mutex_lock(&core_lock); core_timer_sound_default(); settings_load(); settings_preset(); pthread_mutex_unlock(&core_lock);    /* whatever the protocol */
+    airplay_start();                                        /* runs the receiver only while the setting is on */
     davs_start();                                             /* Amazon login for artifact downloads (settings page) */
     static const struct web_hooks web_hooks = { web_attention, web_approved };
     if (core_web_port && web_start(core_web_port, &web_hooks)) { fprintf(stderr, "web: not available\n"); core_web_port = 0; }

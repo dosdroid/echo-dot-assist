@@ -14,6 +14,7 @@
 #include "ringstop.h"
 #include "screen.h"
 #include "sendspin.h"
+#include "airplay.h"
 #include "sound.h"
 #include "sounds.h"
 #include "spkgain.h"
@@ -56,6 +57,7 @@ static const char *bt_lang_codes[sizeof bt_langs / sizeof bt_langs[0]];
 
 static int mic_level = MICGAIN_LEVEL, bt_lang;
 static _Atomic int duck_db = 16;                        /* music_duck: what the music is turned down by while the assistant listens, thinks or speaks (was a fixed 1/6 = 15.6 dB; 16: about that in whole dB) */
+static int airplay;                                    /* off by default: it opens the speaker to the whole network */
 static int bt_audio = 1, bt_speaker, whisper = 1;      /* features kept here; bt_speaker's default: settings_load */
 static int bt_proxy = 1;                                /* on: what every Echo did before the switch came (issue #152) */
 static int light_sensor;                                /* off: auto brightness moved the level in HA's history all day (forum, 2026-10-15) */
@@ -94,7 +96,7 @@ static int colour_actual(void)
 /* ---------------------------------------------------------------- the table */
 
 enum id { WAKE_ENGINE, SPEECH_LANG, WAKE_ADAPT, MIC_LEVEL, DENOISE, WAKE_SOUND, SOUND_TOUCH, SOUND_MICS_OFF, SOUND_MICS_ON, SOUND_VOLUME, SOUND_BT_ON, SOUND_BT_OFF, WAKE_SOUND_REMOVAL, MUTE, DND, TIMER_RING, TIMER_SOUND, TIMER_STOP_ANY, TIMER_STOP_OTHERS, STOP_ENDS, MULTI_PRESS, WAKE_IN_REQ, END_REQ, BT_ANNOUNCE, BT_LANG, LED_AUTO, LED_LEVEL, RING_ROT, BAND, SCR_AUTO, SCR_LEVEL, SCR_ADJUST, SCR_COLOUR, SCREEN_TEXT, SCREEN_HOLD, SCREEN_TIMERS, ARB, ARB_MODE, ARB_AUTO, ARB_WINDOW, ARB_OFFSET, SOUND, WHISPER, WAKE_EVENTS, REQUEST_TEXT, WIFI_MOTION,
-          WIFI_SENS, LIGHT_SENSOR, BT_PROXY, BT_AUDIO, BT_SPEAKER, BT_OUT_DELAY, BT_OUT_AWAKE, BT_OUT_STAY, DROPIN, DROPIN_ANSWER, UPDATES, HTTPS_VERIFY, KIOSK_NET, KIOSK_MIC, KIOSK_CAM, SS_UNPAIRED, EQ_BASS, EQ_MID, EQ_TREBLE, SPK_GAIN, DUCK, DUCK_OTHERS, VOLUME, VOL_SPLIT,
+          WIFI_SENS, LIGHT_SENSOR, BT_PROXY, BT_AUDIO, BT_SPEAKER, BT_OUT_DELAY, BT_OUT_AWAKE, BT_OUT_STAY, DROPIN, DROPIN_ANSWER, UPDATES, HTTPS_VERIFY, KIOSK_NET, KIOSK_MIC, KIOSK_CAM, SS_UNPAIRED, AIRPLAY, EQ_BASS, EQ_MID, EQ_TREBLE, SPK_GAIN, DUCK, DUCK_OTHERS, VOLUME, VOL_SPLIT,
           ASSIST_LINK, ASSIST_LEVEL, ASSIST_OFFSET, SOUNDS_LINK, SOUNDS_LEVEL, SOUNDS_OFFSET, TIMER_LINK, TIMER_LEVEL, TIMER_OFFSET,
           CALL_LINK, CALL_LEVEL, CALL_OFFSET,
           VOL_EVEN, NSET };
@@ -202,6 +204,9 @@ static const struct setting table[NSET] = {
     [KIOSK_MIC]   = { "kiosk_mic", "Kiosk Satellite microphone", "System", NULL, S_BOOL, 0, 1, 0, 0 },
     [KIOSK_CAM]   = { "kiosk_camera", "Kiosk Satellite camera", "System", NULL, S_BOOL, 0, 1, 0, 0 },
     [SS_UNPAIRED] = { "sendspin_unpaired", "Music Assistant without pairing", "Music", NULL, S_BOOL, 0, 1, 1, 0 },
+    /* airplay.c: Shairport Sync beside hassmic, only where the install has it; anyone on the network can then play */
+    /* not exported: one Echo opened to the network does not open the others */
+    [AIRPLAY]     = { "airplay", "AirPlay (experimental)", "Music", NULL, S_BOOL, 0, 1, 0, 0 },
     [EQ_BASS]     = { "equalizer_bass", "Equalizer bass", "Sound", "dB", S_INT, -6, 6, 1, 0 },
     [EQ_MID]      = { "equalizer_mid", "Equalizer mid", "Sound", "dB", S_INT, -6, 6, 1, 0 },
     [EQ_TREBLE]   = { "equalizer_treble", "Equalizer treble", "Sound", "dB", S_INT, -6, 6, 1, 0 },
@@ -248,6 +253,7 @@ static int present(enum id i)
     case ARB: case ARB_MODE: case ARB_AUTO: case ARB_WINDOW: case ARB_OFFSET: case DUCK_OTHERS: case TIMER_STOP_OTHERS: return arb_running();
     case DROPIN: case DROPIN_ANSWER: return dropin_running();
     case SS_UNPAIRED: return core_sendspin_port != 0;
+    case AIRPLAY: return airplay_available();
     case SPK_GAIN: return spkgain_present();
     case MULTI_PRESS: return !board.action_combo;               /* the Shows: no action key, the volume pair stands in */
     case BAND: return ring_band_rows(-1) >= 0;
@@ -363,6 +369,7 @@ int settings_get(const struct setting *s)
     case KIOSK_MIC: return kiosk_mic;
     case KIOSK_CAM: return kiosk_cam;
     case SS_UNPAIRED: return sendspin_unpaired(-1);
+    case AIRPLAY: return airplay;
     case EQ_BASS: case EQ_MID: case EQ_TREBLE: return core_eq((int)(s - table) - EQ_BASS);
     case BT_PROXY: return bt_proxy;
     case BT_AUDIO: return bt_audio;
@@ -439,6 +446,7 @@ static void put(enum id i, int v)
     case KIOSK_MIC: kiosk_mic = v; break;
     case KIOSK_CAM: kiosk_cam = v; break;
     case SS_UNPAIRED: sendspin_unpaired(v); break;              /* sendspin.c keeps it */
+    case AIRPLAY: airplay = v; airplay_enable(v); break;        /* the receiver starts or goes within its thread's next look */
     case EQ_BASS: case EQ_MID: case EQ_TREBLE: core_set_eq(i - EQ_BASS, v); break;     /* the mixer keeps it */
     case BT_PROXY: bt_proxy = v; break;                    /* the links close (feature): proto_esphome.c ends scan and links */
     case BT_AUDIO: bt_audio = v; if (!v) a2dp_pair(0); break;                        /* paired phones still connect */

@@ -247,7 +247,7 @@ static void *player_thread(void *arg)
         if (!atomic_load(&stream_on)) {
             if (c) free(c);
             if (open) {
-                music_close(); open = 0; fprintf(stderr, "sendspin: output closed\n");
+                music_close(); core_music_release(MUSIC_SENDSPIN); open = 0; fprintf(stderr, "sendspin: output closed\n");
                 if (routed >= 0) { drift_of[routed] = servo.drift; drift_save(drift_of, drift_kept); }
             }
             usleep(20000);
@@ -255,7 +255,11 @@ static void *player_thread(void *arg)
         }
         if (!c) continue;
         if (!tf_synced(NULL)) { free(c); continue; }
-        if (!open) { if (music_open(RATE, CHANNELS)) { free(c); usleep(200000); continue; } open = 1; atomic_store(&snap_next, 1); prime_output(); }
+        if (!open) {                                 /* the one music output: AirPlay's until it let go (airplay.c, paused by core_music) */
+            if (!core_music_claim(MUSIC_SENDSPIN)) { free(c); usleep(20000); continue; }
+            if (music_open(RATE, CHANNELS)) { core_music_release(MUSIC_SENDSPIN); free(c); usleep(200000); continue; }
+            open = 1; atomic_store(&snap_next, 1); prime_output();
+        }
 
         while (music_queued_us() > MIXER_TARGET_US && atomic_load(&stream_on)) usleep(5000);
 
