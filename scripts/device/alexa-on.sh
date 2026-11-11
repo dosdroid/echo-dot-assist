@@ -1,8 +1,8 @@
 #!/system/bin/sh
 # Revert alexa-off.sh without rebooting.
 . "${0%/*}/device.conf" || exit 1
-pkill hassmic; pkill mixcap; pkill mixplay
-rm -f /data/misc/avahi/services/hassmic.service
+pkill hassmic; pkill mixcap; pkill mixplay; pkill shairport-sync
+rm -f /data/misc/avahi/services/hassmic.service /data/misc/avahi/services/hassmic-airplay.service
 command -v ledctrl > /dev/null && ledctrl -c
 for s in $UPDATE_SERVICES $BT_SERVICE; do start $s; done
 [ -n "$ALEXA_PROP" ] && setprop $ALEXA_PROP 1     # init trigger starts the Alexa services ($ALEXA_SERVICES)

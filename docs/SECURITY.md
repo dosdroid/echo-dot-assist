@@ -103,6 +103,15 @@ the channel, and only Home Assistant's encrypted link may install.
   (nothing to lose there), only after a press of the action button on one that is. The Wi-Fi password crosses
   Bluetooth unencrypted, as with every Improv device; the Echo keeps only the network key derived from it.
 
+## AirPlay
+
+With "AirPlay" on (setting, off by default, experimental), TCP 28933 and UDP 28934-28943 accept connections from the
+network without any authentication, as an AirPlay speaker without a password does: anyone on it can play audio on the
+Echo and set its volume. The receiver, Shairport Sync, is third-party code that parses what the network sends (its ALAC
+decoder can crash on malformed packets; hassmic starts it again). It runs as the daemon's user, not root, and reaches
+no more of the network than the firewall lets the daemon's plain group reach. The setting is not carried over by exports
+or "make like this Echo".
+
 ## Amazon downloads
 
 The settings page's "Download from Amazon" registers the Echo to your Amazon account. Its tokens stay on the Echo

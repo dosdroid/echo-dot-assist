@@ -684,7 +684,8 @@ ota_watch() {
                 [ -f $D/wifi.sh ] && sh $D/wifi.sh forget 2>&1 | stamped
                 st=/data/local/hassmic/state
                 for f in $st/* $st/.[!.]*; do [ -e "$f" ] || [ -L "$f" ] && rm -rf "$f"; done
-                rm -f /data/misc/avahi/services/hassmic.service
+                rm -f /data/misc/avahi/services/hassmic.service /data/misc/avahi/services/hassmic-airplay.service
+                pkill shairport-sync        # the AirPlay receiver is hassmic's child, but its own process: init may leave it behind
                 start hassmic
                 say "== factory reset done, the satellite starts again"
                 continue
@@ -869,6 +870,9 @@ satellite)
     fast=0
     while :; do
         t0=$(cut -d. -f1 /proc/uptime)
+        # A receiver left from the hassmic before (AirPlay, airplay.c; init kills a service's own process, a double-forked
+        # child can outlive it) would hold the ports the new one asks for
+        pkill shairport-sync 2>/dev/null
         # AIPC refuses uid 0, so run as the stock Alexa client's user (device.conf).  Real group 3990, which no stock process
         # has: hassmic creates its outgoing sockets under it and lockdown.sh lets that reach any address, so replies and music
         # play from wherever Home Assistant points.  Not the effective group: the mixer only records for group aipc.

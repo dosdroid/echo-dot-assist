@@ -25,6 +25,8 @@ dependencies = [
     "jinja2==3.1.6",
     "python-slugify==9.1.2",
     "pyyaml==6.0.3",
+    # The C compiler of the AirPlay receiver's ARM build (tools/airplay/build.sh arm: zig cc, no toolchain to install)
+    "ziglang==0.17.1",
 ]
 
 [tool.uv]

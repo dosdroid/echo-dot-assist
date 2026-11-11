@@ -261,6 +261,7 @@ const HELP = {
   light_band: { help: 'The Echo Show has no light ring: it shows the ring\'s lights as a band along the bottom of the screen, as Alexa did. That is listening, thinking, mic off, calls, volume, timers and Home Assistant\'s "Light ring". This many pixels at the bottom are kept for it, so an app on the screen never has the band over it. 0 gives the whole screen to the apps and shows no band. Default 10, stock\'s line.' },
   bluetooth_announcements: { help: 'Says "Connected to …" and "Disconnected from …" when a phone connects, in your voice assistant\'s voice, after the chime. Home Assistant speaks the words, and only once "Allow the device to perform Home Assistant actions" is ticked in this Echo\'s ESPHome options (Settings → Devices & services → ESPHome → the Echo → Configure); without it there is the chime only.' },
   bluetooth_announcement_language: { help: 'The language of those sentences. Home Assistant does not tell the Echo which language your voice assistant speaks, so pick the one that matches its voice.' },
+  airplay: { tag: 'Experimental', help: 'Makes the Echo an AirPlay speaker for iPhones, iPads and Macs: pick it in the AirPlay menu and the sound plays here (classic AirPlay, audio only, by Shairport Sync). Experimental, and not yet tried on a real Echo or with a real iPhone. There is no password: anyone on your network can play on it and change its volume. It is not AirPlay 2, so no multi-room with HomePods, and apps that list only AirPlay 2 speakers may not show it. The phone\'s volume slider is the Echo\'s volume. The action button pauses and resumes, pressed twice or three times it skips (with "Double and triple press of the action button"). One music source plays at a time: the newest wins. Music Assistant\'s AirPlay Receiver can also play AirPlay here, through Sendspin.' },
   sendspin_unpaired: { help: 'Lets any Music Assistant server on the network play here without pairing. Off: only a server given this Echo\'s "Sendspin pairing token" (a diagnostic entity in Home Assistant) may play.' },
   https_verify: { help: 'Whether the Echo checks the certificate of a Home Assistant that serves HTTPS itself. Home Assistant then gives the Echo https:// addresses for its spoken replies and announcements, usually its external URL. On (the default): the Echo plays them only from a server whose certificate a known authority signed for that very name, as a browser would. A self-signed certificate, or one that does not name the address Home Assistant gives out, is refused: replies stay silent and the log says why. Off: any certificate is taken, so someone on your network could pass the Echo audio of their own instead of Home Assistant\'s. Plain http:// addresses are not affected.' },
   kiosk_internet: { help: 'Kiosk Satellite may reach the internet while this is on: for its own updates and for web pages it shows (iframes, dashboards). Only that app gets out: the Echo\'s own voice satellite stays on your network except for what it needs, and Amazon\'s software stays cut off. Off: it reaches your network only, so it shows Home Assistant but cannot update itself or load outside pages. On by default. Takes effect within seconds.' },
@@ -446,6 +447,7 @@ const SUB = {
   screen_timers: 'Running timers counted down, a ringing one in orange',
   bluetooth_announcements: 'Says when a phone connects or disconnects',
   bluetooth_announcement_language: 'The language of those sentences',
+  airplay: 'An AirPlay speaker for iPhone, iPad and Mac, without a password',
   sendspin_unpaired: 'Any Music Assistant server may play here',
   https_verify: 'Checks the certificate of an HTTPS Home Assistant',
   kiosk_internet: 'Kiosk Satellite may reach the internet',
@@ -1204,9 +1206,9 @@ const PAGE_BUILD = {
   },
   media: (el, list) => {
     const parent = (k) => (HELP[k.name] || {}).parent, plain = list.filter((x) => !x.feature && !parent(x));
-    const music = plain.filter((x) => x.group === 'Music'), bt = plain.filter((x) => x.group !== 'Music');
+    const air = plain.filter((x) => x.name === 'airplay'), music = plain.filter((x) => x.group === 'Music' && !air.includes(x)), bt = plain.filter((x) => x.group !== 'Music');
     const api = state.mass ? h('div', { id: 'mass' }, massRow()) : null;     // models with a screen: its music pages
-    el.append(flow([music.length || api ? titled('Music Assistant', api, music.map(settingRow)) : null, bt.length ? titled('Announcements', bt.map(settingRow)) : null,
+    el.append(flow([music.length || api ? titled('Music Assistant', api, music.map(settingRow)) : null, air.length ? titled('AirPlay', air.map(settingRow)) : null, bt.length ? titled('Announcements', bt.map(settingRow)) : null,
       ...list.filter((x) => x.feature).map((s) => featureCard(s, list.filter((k) => parent(k) === s.name)))].filter(Boolean)));
   },
   features: (el, list) => {

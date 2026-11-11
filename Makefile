@@ -177,6 +177,16 @@ $(OUT)/libcurlspy.so: src/tools/curlspy.c
 	@mkdir -p $(OUT)
 	$(CC) $(CFLAGS) -fPIC -shared $< -o $@ -fuse-ld=lld -ldl
 
+# not part of "all": the AirPlay receiver (setting airplay, src/hassmic/airplay.c): Shairport Sync as one static ARMv7 musl
+# binary for every model, built by tools/airplay/build.sh (needs git, autotools and zig, and fetches the sources).
+# `make airplay` puts it next to hassmic, where airplay.c looks and scripts/bundle.sh and deploy.sh pick it up; without
+# it the setting is not offered.  An existing build/airplay/arm/ is kept: delete it to build again.
+airplay: $(OUT)/shairport-sync
+$(OUT)/shairport-sync: tools/airplay/build.sh
+	@[ -f build/airplay/arm/shairport-sync ] || $< arm
+	@mkdir -p $(OUT)
+	cp build/airplay/arm/shairport-sync $@
+
 # not part of "all": what the Echo's device attestation HAL answers (the key, its fields, a signature), for the
 # questions dha.c was written against
 $(OUT)/dha_test: src/tools/dha_test.c
@@ -416,4 +426,4 @@ version:
 clean:
 	rm -rf build
 
-.PHONY: all host unit $(addprefix unit-,$(UNIT_TESTS)) version clean kmod-missing kernel-tools FORCE
+.PHONY: all airplay host unit $(addprefix unit-,$(UNIT_TESTS)) version clean kmod-missing kernel-tools FORCE

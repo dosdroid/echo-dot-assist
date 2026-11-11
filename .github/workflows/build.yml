@@ -143,9 +143,30 @@ jobs:
         if: matrix.ksrc && steps.kernel.outputs.cache-hit != 'true'
         run: make -s kernel-tools DEVICE=${{ matrix.device }} STUBS=1
 
+      # The AirPlay receiver (tools/airplay/build.sh): one static ARM binary for every model, built with zig from PyPI
+      # (pyproject.toml, so uv sync) and put into each model's build/ by `make airplay`, which bundle.sh then packs.
+      - name: AirPlay receiver cache
+        if: ${{ !env.ACT }}
+        id: airplay
+        uses: actions/cache@v6
+        with:
+          path: build/airplay
+          key: airplay-arm-${{ hashFiles('tools/airplay/build.sh') }}
+      - uses: astral-sh/setup-uv@v10.2.0
+        if: steps.airplay.outputs.cache-hit != 'true'
+        with:
+          python-version: '3.13'
+      - name: AirPlay receiver
+        if: steps.airplay.outputs.cache-hit != 'true'
+        timeout-minutes: 15
+        run: |
+          sudo apt-get update && sudo apt-get install -y --no-install-recommends autoconf automake libtool pkg-config
+          uv sync --locked
+          tools/airplay/build.sh arm
+
       - name: Build
         run: |
-          make -j"$(nproc)" DEVICE=${{ matrix.device }} STUBS=1 RELEASE=1 all build/otatool-host
+          make -j"$(nproc)" DEVICE=${{ matrix.device }} STUBS=1 RELEASE=1 all airplay build/otatool-host
           [ "$(make -s version RELEASE=1)" = "${{ needs.version.outputs.version }}" ]
           # make leaves Wi-Fi motion's module out with a note when it cannot build it: a bundle must not lose it that way
           kmod=$(sed -n 's/^KMOD *:= *//p' devices/${{ matrix.device }}/device.mk)
@@ -182,6 +203,7 @@ jobs:
             build/${{ matrix.device }}/mixcap
             build/${{ matrix.device }}/mixplay
             build/${{ matrix.device }}/pryon_test
+            build/${{ matrix.device }}/shairport-sync
             build/${{ matrix.device }}/*.ko
             build/${{ matrix.device }}/libhmui.so
           if-no-files-found: error
@@ -206,10 +228,22 @@ jobs:
           echo 'man-db man-db/auto-update boolean false' | sudo debconf-set-selections
           sudo rm -f /var/lib/man-db/auto-update
           sudo apt-get update
-          sudo apt-get install -y --no-install-recommends libopus-dev libcurl4 netcat-openbsd sbc-tools
+          sudo apt-get install -y --no-install-recommends libopus-dev libcurl4 netcat-openbsd sbc-tools git autoconf automake libtool pkg-config
       - name: Python packages
         timeout-minutes: 5
         run: uv sync --locked           # .venv exactly as uv.lock says; fails if pyproject.toml changed without uv lock
+      # Shairport Sync for the PC (tools/airplay/build.sh host): tests/fake_airplay.py runs the real receiver
+      - name: AirPlay receiver cache
+        if: ${{ !env.ACT }}
+        id: airplay
+        uses: actions/cache@v6
+        with:
+          path: build/airplay
+          key: airplay-host-${{ hashFiles('tools/airplay/build.sh') }}
+      - name: AirPlay receiver
+        if: steps.airplay.outputs.cache-hit != 'true'
+        timeout-minutes: 10
+        run: tools/airplay/build.sh host
       - name: Build
         run: make -j"$(nproc)" build/hassmic-host build/hassmic-host-screen build/otatool-host
       # tests/run.py starts every test at once, each in a network namespace of its own (unshare -rn: the tests' ports

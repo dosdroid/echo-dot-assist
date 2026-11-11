@@ -11,7 +11,7 @@ cd "$(dirname "$0")/.."
 OUT=${BUNDLE_FROM:-$OUT}            # scripts/content-id.sh: packs from a build of its own
 [ $# = 2 ] || die "usage: [DEVICE=<codename>] scripts/bundle.sh KEY VERSION"
 python3 scripts/otatool.py pack "$1" "$2" $OUT/hassmic.bundle \
-    $OUT/hassmic $OUT/runas $OUT/otatool $(ls $OUT/latency $OUT/mixcap $OUT/mixplay $OUT/pryon_test 2>/dev/null) $DDIR/device.conf:644 \
+    $OUT/hassmic $OUT/runas $OUT/otatool $(ls $OUT/latency $OUT/mixcap $OUT/mixplay $OUT/pryon_test $OUT/shairport-sync 2>/dev/null) $DDIR/device.conf:644 \
     $(for k in $OUT/*.ko; do [ -f "$k" ] && echo "$k:644"; done) $RELEASE_PUB:644 \
     $(for k in wakealign/*.wa wakealign/*.was; do echo "$k:644"; done) \
     scripts/system/main.sh scripts/system/boot.sh scripts/system/sysinstall.sh $DDIR/hassmic.rc:644 \
@@ -22,3 +22,4 @@ python3 scripts/otatool.py pack "$1" "$2" $OUT/hassmic.bundle \
 # wifictl: WifiService's client (wifi.sh), Android models only (device.conf ANDROID); ringbar: the light band's renderer
 # (ring_band.c, SCREEN_BAND); HOME_APK: the home screen (sysinstall.sh); libhmui.so + screen.dex: the screen's UI
 # (screen.c), where the model has one (device.mk SCREEN)
+# shairport-sync: the AirPlay receiver (airplay.c, tools/airplay/), one static binary for every model; only where `make airplay` made it

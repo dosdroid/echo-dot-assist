@@ -591,6 +591,32 @@ one Echo. The log says
   ticked in the Echo's ESPHome options (Settings → Devices & services → ESPHome → the Echo → Configure). Without it
   you hear the chime only. "Bluetooth announcements" on the settings page turns both off and picks their language.
 
+### AirPlay
+
+Experimental, off by default, and so far tried only on a PC against a stand-in for an iPhone: not yet on a real Echo
+or with a real iPhone, iPad or Mac.
+
+Switch on "AirPlay" on the settings page (Music & Bluetooth, card "AirPlay"). The Echo then appears by its name in the
+AirPlay menu of iPhones, iPads and Macs on the same network, and plays what they send, as with any AirPlay speaker. It
+is classic AirPlay ("AirPlay 1") with Shairport Sync, audio only; the setting is offered only where the build brings the
+receiver (`shairport-sync` next to `hassmic`: every release does, `make airplay` for your own).
+
+- **Volume**: the phone's volume slider is the Echo's volume, and the Echo's buttons move the phone's slider back.
+- **Buttons**: the action button pauses and resumes; pressed twice it skips to the next track, three times to the
+  previous one (with "Double and triple press of the action button"). "<wake word>, stop" pauses it. The voice
+  assistant ducks it, as other music.
+- **One source at a time**: the newest wins. AirPlay starting pauses Music Assistant and a phone's Bluetooth music,
+  and they pause AirPlay.
+- **Track and cover** go to the screen of an Echo Show (not tried yet).
+- **Start**: the first sound comes about 2.3 s after the sender starts (Shairport Sync's own schedule; measured on a PC).
+  A pause is heard within 20 ms.
+- **Limits**: not AirPlay 2, so no multi-room with HomePods, and an app that lists only AirPlay 2 speakers may not show
+  the Echo; there is no password, so anyone on your network can play on it and set its volume
+  ([security](SECURITY.md#airplay)); on a Bluetooth speaker its delay is not made up for; whether current versions of
+  iOS and macOS offer classic AirPlay speakers everywhere is not known yet.
+- **Without this setting**: Music Assistant's own "AirPlay Receiver" plugin can already play AirPlay to the Echo
+  through Sendspin.
+
 ### Even volume steps
 
 Each point of the volume is the same step, wherever it is set from (Home Assistant, Music Assistant, the buttons, the

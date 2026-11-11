@@ -74,6 +74,10 @@ aioesphomeapi, wyoming, aiosendspin, noiseprotocol, aiohttp):
                                              # skips without it) with four Echos, one the released build: replies, timing.
                                              # All of it in an `unshare -rn` namespace with only lo
 .venv/bin/python tests/fake_ha.py [--qemu]    # Wyoming; --qemu uses the ARM build + stock Pryon model under qemu-arm
+.venv/bin/python tests/fake_airplay.py        # AirPlay receiver (airplay.c): the real Shairport Sync (build/airplay/host, tools/airplay/build.sh host)
+                                             # against a stand-in iPhone written from the protocol (RSA-wrapped key, ALAC over RTP, sync, DACP):
+                                             # start/stop, mDNS file, sound and its delay, volume both ways, pause, the button, a skip, a
+                                             # receiver killed (HASSMIC_SHAIRPORT, HASSMIC_AIRPLAY_MDNS)
 .venv/bin/python tests/fake_ma_sendspin.py [--legacy]  # Sendspin, as Music Assistant 2.10.8 (aiosendspin 10.2.1, Sendspin 1.0;
                                              # --legacy: 9.1.1 of MA <= 2.10.6, build/aiosendspin-9.1.1 from --setup),
                                              # strict: a deviation MA would only log fails; the output's clock
@@ -342,13 +346,26 @@ No model `#ifdef`s in shared code: new differences become a board field, a `devi
   `main.c` `kiosk_score` + `arbitration_offset` dB, `arbitration_window` ±ms, no key, no priority, always waits); the beacon flags it (1 quiet +
   2 kiosk). The socket belongs to arb's loop thread. `HASSMIC_ARB_SCALE` (tests, `PACE()`): the network's own timers
   (beacons, discovery, tags, handoff, pairing) at that fraction; rounds and the window keep theirs. Page: two cards with pros and cons (`HELP.arbitration_mode.modes`).
+- **AirPlay** (`airplay.c`, `airplay.h`; setting `airplay`, page only, off, experimental, not exported; only where `shairport-sync`
+  is next to the binary, `HASSMIC_SHAIRPORT` on the PC): Shairport Sync 4.3.7, classic AirPlay only, a static musl binary
+  built by `tools/airplay/build.sh host|arm` (`make airplay` -> `build/<codename>/shairport-sync`, optional in bundles and
+  deploy; licences in `tools/airplay/README.md`) and double-forked (never hassmic's direct child), pid in `state/airplay/pid`,
+  `main.sh` also `pkill`s a leftover.  Its stdout PCM (44.1 kHz stereo) is played on the music stream with 120 ms queued
+  (`QUEUE_US`), the rate servo of `resample.c` following the sender's clock; its metadata FIFO `state/airplay/meta` gives play
+  begin/end, flush, volume, track, artwork (Show's screen) and the sender's DACP ids; remote control to the sender by DACP
+  (pause, play, next, previous, volume; port by unicast mDNS), a stop silences at once and is told to the sender after.
+  mDNS: Shairport Sync's external backend runs `avahi-publish-service` from `state/airplay/bin`, a link to hassmic
+  (`airplay_publish`), which writes `hassmic-airplay.service` beside `hassmic.service` in avahi's folder (`HASSMIC_AIRPLAY_MDNS`,
+  `HASSMIC_MDNS_FILE` on the PC; `main.sh` removes it with the other at a factory reset).  TCP 28933, UDP 28934-28943.  No
+  password: anyone on the LAN plays (docs/SECURITY.md).  `MUSIC_AIRPLAY` in `core_music_claim`, `airplay_pause/stop/button/skip/volume_changed`
+  called from `main.c` like the other sources'.  SELinux needs nothing: every service runs in the permissive `su` domain.
 - **Music**: `sendspin.c` (Music Assistant Sendspin player over `ws.c`/`noise.c`/`net.c`/`hash.c`, decodes via
   `dr_flac`/`minimp3`/libopus; in sync by a rate of its own, `resample.c`: a PI servo on the error steering a cubic
   resampler, never frames skipped or repeated, which ticked on the Show 5's clock 350 ppm off; snap past 20 ms; a drift
   learnt per route, the Echo's speaker or a Bluetooth one, kept in `state/sendspin.drift`, held 5 s after a snap; a
   fresh output primed with silence first, `music_prime_us()`: Android's AudioTrack takes its buffer at once as it
   starts, ~137 ms on the Show 5, which the queue leaves out; the A2DP sink resamples through resample.c too). `a2dp.c` + `a2dp_codecs.c` + `sbc.c` = Bluetooth A2DP sink (SBC, AAC via firmware FFmpeg
-  loaded with dlopen, aptX/aptX HD via `freeaptx`) with AVRCP. Only one music source plays at a time (newest wins). "<wake word>, stop" pauses it when nothing else was
+  loaded with dlopen, aptX/aptX HD via `freeaptx`) with AVRCP. Only one music source plays at a time (newest wins: `core_music_claim`, `MUSIC_SENDSPIN`/`MUSIC_BLUETOOTH`/`MUSIC_AIRPLAY`). "<wake word>, stop" pauses it when nothing else was
   stopped (`stop_word`, a bare "stop" transcript in `core_transcript`; issue #51), the action button resumes.
   Ducked (`duck.c` `duck_active()`, issue #165): our own run, our own round from the wake word on, or another member
   answering a wake word we claimed too (its 2-byte `T_MSG` "on" every 2 s / "off" to every member, `arb_tell(NULL)`,
@@ -671,7 +688,7 @@ stock behaviour. `scripts/device/` holds on-device helpers (`lockdown.sh` firewa
 
 Firewall invariant: Amazon's daemons may only reach local addresses; hassmic itself may reach any address (it fetches
 TTS/media URLs from HA/MA). `otad`/`ace_otad` (firmware updates) must never get out. Inbound TCP and UDP are only admitted on
-16384–32767, so every listening port (26053 ESPHome, 16700 Wyoming, 28928 Sendspin, 28929 OTA, 28931 settings page, UDP 28930 arbitration)
+16384–32767, so every listening port (26053 ESPHome, 16700 Wyoming, 28928 Sendspin, 28929 OTA, 28931 settings page, 28933 AirPlay, UDP 28930 arbitration, 28934-28943 AirPlay)
 must stay in that range (UDP 28932 Drop In too). Exceptions: UDP 2330 (Kiosk Satellite's fixed port), which `lockdown.sh` admits only while
 `state/config` says `arbitration_mode=kiosk` (`kiosk_state`), and, where device.conf has `KIOSK_PACKAGE` (and the board `kiosk`, for the settings), the app's own TCP 2324 and 6053 from private addresses while it is installed; its uid may also reach the internet unless `kiosk_internet` is off (`KSUID`). Ping (ICMP echo request) is admitted from the private
 and link-local ranges of `LOCAL4` only. A stock rule hassmic comes to depend on (INPUT or OUTPUT) goes into `keep`, worded as `iptables -S`

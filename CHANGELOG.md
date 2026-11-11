@@ -4,6 +4,16 @@ What changed for people using the Echo, newest first. Details and measurements a
 
 ## 2026-11-11
 
+- **The Echo as an AirPlay speaker, experimental (setting "AirPlay", off by default).** Switch it on on the settings
+  page (Music & Bluetooth, card "AirPlay") and the Echo shows up in the AirPlay menu of iPhones, iPads and Macs on your
+  network; the sound plays on it like any other music. Classic AirPlay (not AirPlay 2: no multi-room with HomePods),
+  audio only, played by Shairport Sync. The phone's volume slider is the Echo's volume; the action button pauses and
+  resumes, twice or three times (with "Double and triple press of the action button") it skips; "<wake word>, stop"
+  pauses it, and the voice assistant ducks it. One music source plays at a time, the newest wins, so it takes over from
+  Music Assistant or a phone over Bluetooth and the other way round. No password: anyone on your network can play
+  on it. Tried only against a stand-in for an iPhone on a PC, not yet on a real Echo or with a real iPhone or Mac. It
+  needs a build that brings the receiver (releases do; `make airplay` for your own). More in
+  [the guide](docs/GUIDE.md#airplay).
 - **A note of your own on each Echo, and your other Echos one click away on the settings page (issue #153).** Several
   Echos of one model differed only by the six characters at the end of their names. Click "Add a note" under the
   name at the top of the menu (or the Note row on the System page) and write where it stands, say "Kitchen, by the

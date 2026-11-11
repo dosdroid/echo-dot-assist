@@ -3569,3 +3569,26 @@ Run in this order. Each step says what it proves.
       existing off, on/off, failed writes, late/lost service, readback, restore, and the signed settings API's visibility,
       persistence across restart, and exports. Presets accept the preference before root publishes readback, without
       exposing an unavailable switch on the page. Physical-device validation of this implementation remains open.
+- [~] AirPlay receiver (2026-11-11, setting `airplay`, settings page only, off by default, experimental): the Echo as a
+      classic AirPlay ("AirPlay 1") speaker for iPhone, iPad and Mac, audio only. Shairport Sync 4.3.7 (the version
+      Music Assistant's AirPlay Receiver ships) runs beside hassmic as a static ARMv7 musl binary (`tools/airplay/build.sh`,
+      zig cc from PyPI's ziglang; musl because Shairport Sync needs `pthread_cancel`, which bionic lacks; one binary for
+      every model, ~500 KB, `make airplay`, in every bundle, CI builds and caches it); `airplay.c` plays its stdout PCM on
+      the music stream (`MUSIC_AIRPLAY`, `core_music_claim`: one source at a time, newest wins), reads its metadata FIFO,
+      controls the sender by DACP (pause, play, next, previous, volume) and publishes `_raop._tcp` through the stock avahi
+      (the receiver's "avahi-publish-service" is a link to hassmic). TCP 28933, UDP 28934-28943. No password; AirPlay 2
+      not possible (PTP on UDP 319/320 as root). Tested on the PC only (`tests/fake_airplay.py`: the real Shairport
+      Sync against a stand-in sender written from the protocol: RSA-wrapped AES key, ALAC over RTP, timing and sync
+      packets, DACP); the ARM binary only run under qemu-arm (`-V`). **Not yet run on a real Echo, not yet tested with a
+      real iPhone or Mac.** Measured on the PC (2026-11-11): first sound 2.32 s after the sender's first packet with a
+      lead-in, 2.25 s after a flush with packets right behind it (Shairport Sync's own schedule on its stdout backend,
+      which it calls unsynchronised: good to about 70 ms); a pause on the sender or the Echo's button silences the
+      output within one 20 ms block; 120 ms kept between Shairport Sync and the speaker (`QUEUE_US`).
+      **Open:** run it on each model (SELinux: exec of the static binary, FIFO and symlink in `state/`; avahi picking up
+      the second service file; firewall: the receiver's sockets are created under the daemon's plain group, LAN only);
+      which interface Shairport Sync takes its device id from on each Echo (the first non-loopback interface with a
+      hardware address: two Echos must not end up with the same or an all-zero id); real iOS and macOS senders, including
+      whether iOS still offers classic AirPlay receivers everywhere (reports of iOS 18 betas and 18.4 breaking AirPlay 1);
+      DACP from iOS (the port is looked up by unicast mDNS to the sender; IPv6 senders are not handled); a Bluetooth
+      speaker's latency is not compensated; no AirPlay 2; no password option; metadata and artwork go to the Echo Show's
+      screen but that path is untested (`hassmic-host-screen`).

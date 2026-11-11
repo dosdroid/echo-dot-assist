@@ -55,6 +55,7 @@ with a clock (36EBT3) is another model, and not supported. Every other Echo, and
 | Timers, announcements, follow-ups       | ✅                             | ✅                                                    |
 | Drop In between Echos                   | ✅ through Amazon              | ✅ [on your network](docs/GUIDE.md#drop-in)           |
 | Multiroom music                         | Amazon speaker groups          | [Music Assistant](docs/GUIDE.md#music) (Sendspin)     |
+| AirPlay speaker for iPhone and Mac      | –                              | [classic AirPlay](docs/GUIDE.md#airplay), experimental |
 | Bluetooth speaker for your phone        | SBC                            | SBC, AAC, aptX, aptX HD                               |
 | Plays on a Bluetooth speaker            | ✅                             | ✅                                                    |
 | Bluetooth proxy for Home Assistant      | –                              | ✅                                                    |
