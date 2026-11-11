@@ -4,12 +4,15 @@
 #include "a2dp.h"
 #include "arb.h"
 #include "dropin.h"
+#include "duck.h"
 #include "https.h"
 #include "ble.h"
 #include "btout.h"
 #include "micend.h"
 #include "micgain.h"
 #include "ring.h"
+#include "ringstop.h"
+#include "screen.h"
 #include "sendspin.h"
 #include "sound.h"
 #include "sounds.h"
@@ -17,9 +20,10 @@
 #include "update.h"
 #include "wifimotion.h"
 #include "statefile.h"
-#include "ring.h"
+#include "buttons.h"
 #include <ctype.h>
 #include <limits.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -51,7 +55,9 @@ const int bt_lang_count = (int)(sizeof bt_langs / sizeof bt_langs[0]);
 static const char *bt_lang_codes[sizeof bt_langs / sizeof bt_langs[0]];
 
 static int mic_level = MICGAIN_LEVEL, bt_lang;
+static _Atomic int duck_db = 16;                        /* music_duck: what the music is turned down by while the assistant listens, thinks or speaks (was a fixed 1/6 = 15.6 dB; 16: about that in whole dB) */
 static int bt_audio = 1, bt_speaker, whisper = 1;      /* features kept here; bt_speaker's default: settings_load */
+static int bt_proxy = 1;                                /* on: what every Echo did before the switch came (issue #152) */
 static int light_sensor;                                /* off: auto brightness moved the level in HA's history all day (forum, 2026-10-15) */
 static int kiosk_net = 1;                                 /* lockdown.sh reads it from state/config */
 static int kiosk_mic;                                     /* off: main.sh keeps RECORD_AUDIO from the app; it reads state/config */
@@ -59,14 +65,36 @@ static int kiosk_cam;                                     /* off: and CAMERA */
 static int bt_stay;                                     /* a2dp.c gets it only while the feature is on: off drops the link */
 static int wake_events;                                 /* off: an event per near miss is HA history most homes never read */
 static int request_text;                                /* off: what people say kept in HA's history is theirs to choose */
+/* The Echo Show's backlight, as stock's Display settings have it (KnightSettings: "Adaptive brightness" is Android's
+ * screen_brightness_mode, its slider screen_brightness or, adaptive, screen_auto_brightness_adj).  Kept here, applied
+ * by root's main.sh backlight from state/config.  Off and 47 % (setting 120 of 255) by default: what every Show ran at
+ * since stock's curve held a dim room's backlight at 5/255 (issue #126, PLAN.md) */
+static int backlight_auto, backlight_level = 47, backlight_adjust;
+/* The Echo Show 8 2nd gen's "Adaptive Color" (stock's Display settings, issue #162): the screen's white follows the
+ * room's light, yellow at night.  Applied by root's main.sh backlight through the binder service ambientdisplayinfo.
+ * Off by default: dashboard colours stay constant.  The requested value is saved separately from root's readback,
+ * so a failed Binder call cannot look successful or change the preference when another setting is saved */
+static int adaptive_colour, loading_preset;
 
 static const char *state_dir(void) { const char *e = getenv("HASSMIC_STATE"); return e ? e : "/data/local/hassmic/state"; }
 static void path(char *out, size_t cap, const char *file) { snprintf(out, cap, "%s/%s", state_dir(), file); }
 
+static int colour_supported(void) { return board.adaptive_colour || getenv("HASSMIC_FAKE_ADAPTIVE_COLOUR"); }
+
+static int colour_actual(void)
+{
+    const char *p = getenv("HASSMIC_FAKE_ADAPTIVE_COLOUR");
+    if (!colour_supported()) return -1;
+    FILE *f = fopen(p ? p : "/data/local/hassmic/adaptive-colour", "r");
+    if (!f) return -1;
+    char v[8]; int n = fread(v, 1, sizeof v, f); fclose(f);
+    return n == 2 && v[1] == '\n' && (v[0] == '0' || v[0] == '1') ? v[0] - '0' : -1;
+}
+
 /* ---------------------------------------------------------------- the table */
 
-enum id { WAKE_ENGINE, SPEECH_LANG, WAKE_ADAPT, MIC_LEVEL, DENOISE, WAKE_SOUND, SOUND_TOUCH, SOUND_MICS_OFF, SOUND_MICS_ON, SOUND_VOLUME, SOUND_BT_ON, SOUND_BT_OFF, WAKE_SOUND_REMOVAL, MUTE, DND, TIMER_RING, TIMER_SOUND, TIMER_STOP_ANY, STOP_ENDS, WAKE_IN_REQ, END_REQ, BT_ANNOUNCE, BT_LANG, LED_AUTO, LED_LEVEL, RING_ROT, BAND, ARB, ARB_MODE, ARB_AUTO, ARB_WINDOW, ARB_OFFSET, SOUND, WHISPER, WAKE_EVENTS, REQUEST_TEXT, WIFI_MOTION,
-          WIFI_SENS, LIGHT_SENSOR, BT_AUDIO, BT_SPEAKER, BT_OUT_DELAY, BT_OUT_AWAKE, BT_OUT_STAY, DROPIN, DROPIN_ANSWER, UPDATES, HTTPS_VERIFY, KIOSK_NET, KIOSK_MIC, KIOSK_CAM, SS_UNPAIRED, EQ_BASS, EQ_MID, EQ_TREBLE, SPK_GAIN, VOLUME, VOL_SPLIT,
+enum id { WAKE_ENGINE, SPEECH_LANG, WAKE_ADAPT, MIC_LEVEL, DENOISE, WAKE_SOUND, SOUND_TOUCH, SOUND_MICS_OFF, SOUND_MICS_ON, SOUND_VOLUME, SOUND_BT_ON, SOUND_BT_OFF, WAKE_SOUND_REMOVAL, MUTE, DND, TIMER_RING, TIMER_SOUND, TIMER_STOP_ANY, TIMER_STOP_OTHERS, STOP_ENDS, MULTI_PRESS, WAKE_IN_REQ, END_REQ, BT_ANNOUNCE, BT_LANG, LED_AUTO, LED_LEVEL, RING_ROT, BAND, SCR_AUTO, SCR_LEVEL, SCR_ADJUST, SCR_COLOUR, SCREEN_TEXT, SCREEN_HOLD, SCREEN_TIMERS, ARB, ARB_MODE, ARB_AUTO, ARB_WINDOW, ARB_OFFSET, SOUND, WHISPER, WAKE_EVENTS, REQUEST_TEXT, WIFI_MOTION,
+          WIFI_SENS, LIGHT_SENSOR, BT_PROXY, BT_AUDIO, BT_SPEAKER, BT_OUT_DELAY, BT_OUT_AWAKE, BT_OUT_STAY, DROPIN, DROPIN_ANSWER, UPDATES, HTTPS_VERIFY, KIOSK_NET, KIOSK_MIC, KIOSK_CAM, SS_UNPAIRED, EQ_BASS, EQ_MID, EQ_TREBLE, SPK_GAIN, DUCK, DUCK_OTHERS, VOLUME, VOL_SPLIT,
           ASSIST_LINK, ASSIST_LEVEL, ASSIST_OFFSET, SOUNDS_LINK, SOUNDS_LEVEL, SOUNDS_OFFSET, TIMER_LINK, TIMER_LEVEL, TIMER_OFFSET,
           CALL_LINK, CALL_LEVEL, CALL_OFFSET,
           VOL_EVEN, NSET };
@@ -103,6 +131,10 @@ static const struct setting table[NSET] = {
      * (state/timer_sound.wav), an export says only "custom" */
     [TIMER_SOUND] = { "timer_sound", "Timer sound", "Voice", NULL, S_CHOICE, 0, 0, 1, 0 },
     [TIMER_STOP_ANY] = { "timer_stop_any", "Any request stops a ringing timer", "Voice", NULL, S_BOOL, 0, 1, 1, 0 },
+    /* ringstop.c keeps it (issue #161): this Echo's ring ends on a "stop" another Echo of the network heard */
+    [TIMER_STOP_OTHERS] = { "timer_stop_from_others", "A stop another Echo heard ends the ring", "Voice", NULL, S_BOOL, 0, 1, 1, 0 },
+    /* buttons.c keeps it: double press of the action button = next, triple = previous; a single press waits 450 ms */
+    [MULTI_PRESS] = { "multi_press", "Double and triple press of the action button", "Voice", NULL, S_BOOL, 0, 1, 1, 0 },
     [STOP_ENDS]   = { "stop_ends_listening", "Stop after the wake word ends listening", "Voice", NULL, S_BOOL, 0, 1, 1, 0 },
     /* main.c: the request's audio from the wake word on (replay_whole); not with Home Assistant's wake word */
     [WAKE_IN_REQ] = { "wake_word_in_request", "Wake word in the request", "Voice", NULL, S_BOOL, 0, 1, 1, 0 },
@@ -116,6 +148,19 @@ static const struct setting table[NSET] = {
     [RING_ROT]    = { "ring_rotation", "Light ring rotation", "Lights", "LEDs", S_INT, 0, 23, 0, 0 },   /* settings_max() */
     /* ring_band.c: the screen's rows kept for the light band (stock's attention line is 10) */
     [BAND]        = { "light_band", "Light band", "Lights", "px", S_INT, 0, 40, 1, 0 },
+    /* the backlight (backlight_auto above): the level with adaptive off, the shift of Amazon's lux curve with it on
+     * (-100..100 = screen_auto_brightness_adj -1..1) */
+    [SCR_AUTO]    = { "screen_brightness_auto", "Adaptive brightness", "Lights", NULL, S_BOOL, 0, 1, 1, 0 },
+    [SCR_LEVEL]   = { "screen_brightness", "Screen brightness", "Lights", "%", S_INT, 1, 100, 1, 0 },
+    [SCR_ADJUST]  = { "screen_brightness_adjust", "Adaptive brightness adjustment", "Lights", NULL, S_INT, -100, 100, 1, 0 },
+    [SCR_COLOUR]  = { "screen_adaptive_colour", "Adaptive colour", "Lights", NULL, S_BOOL, 0, 1, 1, 0 },     /* adaptive_colour above */
+    /* screen.c, the UI's words.c: what was said and the reply over the screen.  Off: words people say are shown only
+     * where someone wants them shown */
+    [SCREEN_TEXT] = { "screen_text", "Speech on screen", "Lights", NULL, S_BOOL, 0, 1, 1, 0 },
+    /* how long the words stay once the Echo is idle again; 0 until the next request */
+    [SCREEN_HOLD] = { "screen_text_seconds", "Speech stays for", "Lights", "s", S_INT, 0, 120, 1, 0 },
+    /* running timers counted down, a ringing one pulsing, on the same layer */
+    [SCREEN_TIMERS] = { "screen_timers", "Timers on screen", "Lights", NULL, S_BOOL, 0, 1, 1, 0 },
     [ARB]         = { "arbitration", "Wake word arbitration with other Echos", "Features", NULL, S_BOOL, 0, 1, 1, 1 },
     /* arb.c keeps them in memory, state/config on disk: lockdown.sh admits Kiosk Satellite's port by it */
     [ARB_MODE]    = { "arbitration_mode", "Arbitration mode", "Features", NULL, S_CHOICE, 0, 0, 1, 0 },
@@ -131,6 +176,10 @@ static const struct setting table[NSET] = {
     [WIFI_MOTION] = { "wifi_motion", "Wi-Fi motion (experimental)", "Features", NULL, S_BOOL, 0, 1, 1, 1 },
     [WIFI_SENS]   = { "wifi_motion_sensitivity", "Wi-Fi motion sensitivity", "Features", NULL, S_INT, WIFIMOTION_SENS_MIN, WIFIMOTION_SENS_MAX, 1, 0 },
     [LIGHT_SENSOR] = { "light_sensor", "Light sensor", "Features", NULL, S_BOOL, 0, 1, 1, 1 },
+    /* proto_esphome.c bt_proxy(): off, the device info names no proxy, so Home Assistant sets up no scanner, and
+     * subscriptions and GATT requests are refused (issue #152).  Disabling the entities in Home Assistant leaves the
+     * scanner running: the proxy is no entity.  Phones, the speaker and Improv keep the controller */
+    [BT_PROXY]    = { "bluetooth_proxy", "Bluetooth proxy", "Features", NULL, S_BOOL, 0, 1, 1, 1 },
     [BT_AUDIO]    = { "bluetooth_audio", "Bluetooth audio from phones", "Features", NULL, S_BOOL, 0, 1, 1, 1 },
     [BT_SPEAKER]  = { "bluetooth_speaker", "Play on a Bluetooth speaker", "Features", NULL, S_BOOL, 0, 1, 1, 1 },
     /* what the speaker adds to the Echo's latency, for Sendspin's sync: a2dp.c keeps it (state/bt_speaker), per speaker
@@ -158,6 +207,10 @@ static const struct setting table[NSET] = {
     [EQ_TREBLE]   = { "equalizer_treble", "Equalizer treble", "Sound", "dB", S_INT, -6, 6, 1, 0 },
     /* over stock (spkgain.c); not exported: speakers of one model differ (one Dot 2 is clean where another is too loud) */
     [SPK_GAIN]    = { "speaker_gain", "Speaker gain", "Sound", "dB", S_INT, 0, SPKGAIN_MAX, 0, 0 },  /* settings_max() */
+    /* sendspin.c and a2dp.c read it through settings_duck_gain(); exported: how much the music gives way is about the household's taste, not the room */
+    [DUCK]        = { "music_duck", "Music ducking", "Sound", "dB", S_INT, 0, 60, 1, 0 },
+    /* duck.c keeps it: the music also goes down while another Echo answers a wake word this one heard (issue #165) */
+    [DUCK_OTHERS] = { "duck_for_others", "Duck for other Echos", "Sound", NULL, S_BOOL, 0, 1, 1, 0 },
     /* the page draws these as one card of its own (web/app.js buildVolumes).  The volume itself (music's, with separate
      * volumes) is the mixer's or main.c's, not state/config's, and no export's: a volume is for the room it is in */
     [VOLUME]      = { "volume", "Volume", "Sound", "%", S_INT, 0, 100, 0, 0 },
@@ -186,27 +239,45 @@ static const struct setting table[NSET] = {
 static int present(enum id i)
 {
     switch (i) {
-    case BT_ANNOUNCE: case BT_LANG: case BT_AUDIO: case BT_SPEAKER: case BT_OUT_DELAY: case BT_OUT_AWAKE: case BT_OUT_STAY: return ble_present();
+    case BT_ANNOUNCE: case BT_LANG: case BT_PROXY: case BT_AUDIO: case BT_SPEAKER: case BT_OUT_DELAY: case BT_OUT_AWAKE: case BT_OUT_STAY: return ble_present();
     case WHISPER: return core_whisper_model();
     case SOUND: return sound_model() != SOUND_NONE;               /* the firmware has one on every model so far */
     case LIGHT_SENSOR: return core_lux() == core_lux();          /* a light sensor: not NAN */
     case LED_AUTO: return core_led_has_auto();
     case WIFI_MOTION: case WIFI_SENS: return wifimotion_present();
-    case ARB: case ARB_MODE: case ARB_AUTO: case ARB_WINDOW: case ARB_OFFSET: return arb_running();
+    case ARB: case ARB_MODE: case ARB_AUTO: case ARB_WINDOW: case ARB_OFFSET: case DUCK_OTHERS: case TIMER_STOP_OTHERS: return arb_running();
     case DROPIN: case DROPIN_ANSWER: return dropin_running();
     case SS_UNPAIRED: return core_sendspin_port != 0;
     case SPK_GAIN: return spkgain_present();
+    case MULTI_PRESS: return !board.action_combo;               /* the Shows: no action key, the volume pair stands in */
     case BAND: return ring_band_rows(-1) >= 0;
     case KIOSK_NET: case KIOSK_MIC: case KIOSK_CAM: return board.kiosk;
+    case SCR_AUTO: case SCR_LEVEL: case SCR_ADJUST: return board.backlight || getenv("HASSMIC_FAKE_BACKLIGHT");   /* tests */
+    case SCR_COLOUR: return colour_actual() >= 0;
+    case SCREEN_TEXT: return screen_words_on(-1) >= 0;
+    case SCREEN_HOLD: return screen_words_hold(-1) >= 0;
+    case SCREEN_TIMERS: return screen_timers_on(-1) >= 0;
     case RING_ROT: return ring_band_rows(-1) < 0;                 /* LEDs to turn: the Dots' ring, not the band */
     default: return 1;
     }
 }
 
+float settings_duck_gain(void) { return powf(10.0f, -(float)duck_db / 20.0f); }
+
 static int ids[NSET], nids = -1;
-static void index_table(void) { if (nids < 0) { nids = 0; for (int i = 0; i < NSET; i++) if (present(i)) ids[nids++] = i; } }
+static void index_table(void)
+{
+    /* Root's backlight helper starts beside hassmic: a service discovered after the first page read still appears. */
+    static int colour_present = -1;
+    int colour = present(SCR_COLOUR);
+    if (nids < 0 || colour != colour_present) {
+        colour_present = colour; nids = 0;
+        for (int i = 0; i < NSET; i++) if (i == SCR_COLOUR ? colour : present(i)) ids[nids++] = i;
+    }
+}
 int settings_count(void) { index_table(); return nids; }
-const struct setting *settings_at(int i) { index_table(); return i >= 0 && i < nids ? &table[ids[i]] : NULL; }
+/* settings_count takes a snapshot: root may remove its readback while web.c iterates that count under core_lock. */
+const struct setting *settings_at(int i) { if (nids < 0) index_table(); return i >= 0 && i < nids ? &table[ids[i]] : NULL; }
 const struct setting *settings_find(const char *name)
 {
     index_table();
@@ -268,7 +339,9 @@ int settings_get(const struct setting *s)
     case TIMER_RING: return core_timer_ring(-1);
     case TIMER_SOUND: return core_timer_sound(-1);
     case TIMER_STOP_ANY: return core_timer_stop_any(-1);
+    case TIMER_STOP_OTHERS: return ringstop_from_others(-1);
     case STOP_ENDS: return core_stop_ends_listening(-1);
+    case MULTI_PRESS: return buttons_multi_press(-1);
     case WAKE_IN_REQ: return core_wake_in_request(-1);
     case END_REQ: return core_end_of_request(-1);
     case BT_ANNOUNCE: return core_bt_announce(-1);
@@ -291,6 +364,7 @@ int settings_get(const struct setting *s)
     case KIOSK_CAM: return kiosk_cam;
     case SS_UNPAIRED: return sendspin_unpaired(-1);
     case EQ_BASS: case EQ_MID: case EQ_TREBLE: return core_eq((int)(s - table) - EQ_BASS);
+    case BT_PROXY: return bt_proxy;
     case BT_AUDIO: return bt_audio;
     case BT_SPEAKER: return bt_speaker;
     case BT_OUT_DELAY: return a2dp_out_delay(-1);
@@ -303,6 +377,8 @@ int settings_get(const struct setting *s)
     case DROPIN: return dropin_enable(-1);
     case DROPIN_ANSWER: return dropin_ask(-1);
     case SPK_GAIN: return spkgain_get();
+    case DUCK: return duck_db;
+    case DUCK_OTHERS: return duck_for_others(-1);
     case VOLUME: return core_volume();
     case VOL_SPLIT: return core_separate_volumes(-1);
     case VOL_EVEN: return core_even_volume(-1);
@@ -310,6 +386,13 @@ int settings_get(const struct setting *s)
     case ASSIST_LEVEL: case SOUNDS_LEVEL: case TIMER_LEVEL: case CALL_LEVEL: return core_kind_volume((int)(s - table - ASSIST_LINK) / 3, -1);
     case ASSIST_OFFSET: case SOUNDS_OFFSET: case TIMER_OFFSET: case CALL_OFFSET: return core_kind_offset((int)(s - table - ASSIST_LINK) / 3);
     case BAND: return ring_band_rows(-1);
+    case SCR_AUTO: return backlight_auto;
+    case SCR_LEVEL: return backlight_level;
+    case SCR_ADJUST: return backlight_adjust;
+    case SCR_COLOUR: { int v = colour_actual(); return v >= 0 ? v : adaptive_colour; }
+    case SCREEN_TEXT: return screen_words_on(-1);
+    case SCREEN_HOLD: return screen_words_hold(-1);
+    case SCREEN_TIMERS: return screen_timers_on(-1);
     default: return 0;
     }
 }
@@ -332,7 +415,9 @@ static void put(enum id i, int v)
     case TIMER_RING: core_timer_ring(v); break;
     case TIMER_SOUND: core_timer_sound(v); break;              /* refused without its file: settings_set says so */
     case TIMER_STOP_ANY: core_timer_stop_any(v); break;
+    case TIMER_STOP_OTHERS: ringstop_from_others(v); break;
     case STOP_ENDS: core_stop_ends_listening(v); break;
+    case MULTI_PRESS: buttons_multi_press(v); break;
     case WAKE_IN_REQ: core_wake_in_request(v); break;
     case END_REQ: core_end_of_request(v); break;
     case BT_ANNOUNCE: core_bt_announce(v); break;
@@ -355,6 +440,7 @@ static void put(enum id i, int v)
     case KIOSK_CAM: kiosk_cam = v; break;
     case SS_UNPAIRED: sendspin_unpaired(v); break;              /* sendspin.c keeps it */
     case EQ_BASS: case EQ_MID: case EQ_TREBLE: core_set_eq(i - EQ_BASS, v); break;     /* the mixer keeps it */
+    case BT_PROXY: bt_proxy = v; break;                    /* the links close (feature): proto_esphome.c ends scan and links */
     case BT_AUDIO: bt_audio = v; if (!v) a2dp_pair(0); break;                        /* paired phones still connect */
     case BT_SPEAKER:                                            /* back on the Echo, and the link goes */
         bt_speaker = v; a2dp_out_stay(bt_stay && v); if (!v && a2dp_out_enabled()) a2dp_out_enable(0); break;
@@ -368,6 +454,8 @@ static void put(enum id i, int v)
     case DROPIN: dropin_enable(v); break;
     case DROPIN_ANSWER: dropin_ask(v); break;
     case SPK_GAIN: spkgain_set(v); break;
+    case DUCK: duck_db = v; break;
+    case DUCK_OTHERS: duck_for_others(v); break;
     case VOLUME: core_set_volume(v); break;
     case VOL_SPLIT: core_separate_volumes(v); break;
     case VOL_EVEN: core_even_volume(v); break;
@@ -375,6 +463,13 @@ static void put(enum id i, int v)
     case ASSIST_LEVEL: case SOUNDS_LEVEL: case TIMER_LEVEL: case CALL_LEVEL: core_kind_volume((i - ASSIST_LINK) / 3, v); break;
     case ASSIST_OFFSET: case SOUNDS_OFFSET: case TIMER_OFFSET: case CALL_OFFSET: core_set_kind_offset((i - ASSIST_LINK) / 3, v); break;
     case BAND: ring_band_rows(v); break;
+    case SCR_AUTO: backlight_auto = v; break;                   /* root's main.sh sees state/config change */
+    case SCR_LEVEL: backlight_level = v; break;
+    case SCR_ADJUST: backlight_adjust = v; break;
+    case SCR_COLOUR: adaptive_colour = v; break;                /* main.sh as well */
+    case SCREEN_TEXT: screen_words_on(v); break;
+    case SCREEN_HOLD: screen_words_hold(v); break;
+    case SCREEN_TIMERS: screen_timers_on(v); break;
     default: break;
     }
 }
@@ -424,7 +519,14 @@ void settings_save(void)
     path(p, sizeof p, "config");
     if (statefile_open(&s, p, 0666)) { fprintf(stderr, "settings: cannot write %s.tmp\n", p); return; }
     fprintf(s.f, "# hassmic settings: name=value; the web page and Home Assistant write it\n");
-    for (int i = 0; i < NSET; i++) if (ours(i) && present(i)) { format(&table[i], v, sizeof v); fprintf(s.f, "%s=%s\n", table[i].name, v); }
+    for (int i = 0; i < NSET; i++) if (ours(i)) {
+        /* Keep the requested colour even while the service is down, and never save a video's temporary override. */
+        if (i == SCR_COLOUR) {
+            if (!colour_supported()) continue;
+            snprintf(v, sizeof v, "%s", adaptive_colour ? "on" : "off");
+        } else { if (!present(i)) continue; format(&table[i], v, sizeof v); }
+        fprintf(s.f, "%s=%s\n", table[i].name, v);
+    }
     if (statefile_commit(&s)) fprintf(stderr, "settings: cannot write %s\n", p);
 }
 
@@ -452,13 +554,19 @@ static int load_old(void)
 }
 
 /* "Wake sound" off used to silence the button, microphone and volume sounds too (never Bluetooth's).  An Echo that had
- * it off stays as quiet: called while its config has none of the sounds' own switches yet */
-static void wake_sound_was_all(void)
+ * it off stays as quiet: called while its config has none of the sounds' own switches yet, and for an export of then
+ * (settings_apply_text).  How many it turned off (those still on) */
+static const enum id wake_sound_covered[] = { SOUND_TOUCH, SOUND_MICS_OFF, SOUND_MICS_ON, SOUND_VOLUME };
+static int wake_sound_was_all(void)
 {
-    if (core_wake_sound(-1)) return;
-    static const int s[] = { SND_TOUCH, SND_MICS_OFF, SND_MICS_ON, SND_VOLUME };
-    for (size_t i = 0; i < sizeof s / sizeof *s; i++) core_sound_on(s[i], 0);
-    fprintf(stderr, "settings: \"Wake sound\" was off: the button, microphone and volume sounds now off on their own switches\n");
+    if (core_wake_sound(-1)) return 0;
+    int n = 0;
+    for (size_t i = 0; i < sizeof wake_sound_covered / sizeof *wake_sound_covered; i++) {
+        const int snd = switched_sound(wake_sound_covered[i]);
+        if (core_sound_on(snd, -1)) { core_sound_on(snd, 0); n++; }     /* one already off is no change to count */
+    }
+    if (n) fprintf(stderr, "settings: \"Wake sound\" was off: the button, microphone and volume sounds now off on their own switches\n");
+    return n;
 }
 
 /* the next line of f into buf, as fgets; one longer than buf is skipped whole (its tail, read as a line of its own,
@@ -518,7 +626,11 @@ void settings_preset(void)
     if (n < 0 || n > 65536 || !(t = calloc(1, (size_t)n + 1))) { fclose(f); fprintf(stderr, "settings: preset %s unreadable, ignored\n", p); return; }
     if (fread(t, 1, (size_t)n, f) != (size_t)n) n = 0;
     fclose(f);
+    /* Root starts beside us and may still be waiting for Android. A supported preference must survive that gap,
+     * while the page continues to hide the switch until root has a confirmed readback. */
+    loading_preset = 1;
     int k = settings_apply_text(t, err, sizeof err);
+    loading_preset = 0;
     fprintf(stderr, "settings: preset applied, %d setting%s%s%s", k, k == 1 ? "" : "s", err[0] ? "; not taken:\n" : "\n", err);
     free(t);
     if (rename(p, done)) remove(p);                     /* once only, whatever happened */
@@ -554,6 +666,7 @@ int settings_peek(const char *name, char *out, size_t cap)
 
 int settings_mic_level(void) { return mic_level; }
 const char *settings_speech_language(void) { return speech_lang > 0 && speech_lang < 6 ? speech_langs[speech_lang] : ""; }
+int settings_bt_proxy(void) { return bt_proxy; }
 int settings_on(const char *name) { const struct setting *s = settings_find(name); return s && s->type == S_BOOL && settings_get(s); }
 const struct bt_lang *settings_bt_lang(void) { return &bt_langs[bt_lang]; }
 int settings_bt_lang_index(int set) { if (set >= 0 && set < bt_lang_count) bt_lang = set; return bt_lang; }
@@ -563,6 +676,7 @@ int settings_bt_lang_index(int set) { if (set >= 0 && set < bt_lang_count) bt_la
 int settings_set(const char *name, const char *value, char *err, size_t errsz)
 {
     const struct setting *s = settings_find(name); int v;
+    if (!s && loading_preset && colour_supported() && !strcmp(name, table[SCR_COLOUR].name)) s = &table[SCR_COLOUR];
     if (!s) { snprintf(err, errsz, "%s: no such setting on this Echo", name); return -1; }
     if (parse(s, value, &v)) { snprintf(err, errsz, "%s: \"%s\" is not a value it takes", name, value); return -1; }
     int was = settings_get(s);
@@ -574,6 +688,10 @@ int settings_set(const char *name, const char *value, char *err, size_t errsz)
         return -1;
     }
     if (ours((enum id)(s - table))) settings_save();
+    if (s - table == SCR_COLOUR) {
+        char p[300]; path(p, sizeof p, "adaptive-colour-request");
+        if (statefile_write(p, 0666, "", 0)) { snprintf(err, errsz, "%s: could not ask root to apply the setting", name); return -1; }
+    }
     core_settings_changed();
     if (s->feature && was != v) core_entities_changed();          /* Home Assistant reads the list again */
     return 0;
@@ -588,10 +706,41 @@ size_t settings_text(char *out, size_t cap, int export_only)
         if (export_only && !s->export_) continue;
         /* a level fixes it (auto off): with auto on, the level is only what the room made it */
         if (export_only && ids[i] == LED_LEVEL && present(LED_AUTO) && core_led_auto(-1)) continue;
-        format(s, v, sizeof v);
+        if (export_only && ids[i] == SCR_COLOUR) snprintf(v, sizeof v, "%s", adaptive_colour ? "on" : "off");
+        else format(s, v, sizeof v);
         n += (size_t)snprintf(out + n, cap - n, "%s=%s\n", s->name, v);
     }
     return n < cap ? n : cap;
+}
+
+/* past key on the last of text's lines that starts with it (indented or not, as settings_apply_text reads them): what
+ * applying text ends up with.  NULL: none */
+static const char *text_line(const char *text, const char *key)
+{
+    const char *hit = NULL; size_t k = strlen(key);
+    for (const char *p = text; *p; ) {
+        while (isspace((unsigned char)*p)) p++;
+        if (!strncmp(p, key, k)) hit = p + k;
+        p += strcspn(p, "\n"); p += *p == '\n';
+    }
+    return hit;
+}
+
+/* An export from before the sounds had switches of their own (f95d9f9, #87, 2026-11-02): its "Wake sound" off also
+ * stood for the button, microphone and volume sounds, which it has no lines for (exports came with adaa7d8, after
+ * 29c86e0 put those sounds under that switch, so every such export meant all four) */
+static int export_from_before_switches(const char *text)
+{
+    char v[8], key[40]; const char *w; int x;
+    snprintf(key, sizeof key, "%s=", table[WAKE_SOUND].name);
+    if (!text_line(text, SETTINGS_EXPORT_HEAD) || !(w = text_line(text, key))) return 0;
+    snprintf(v, sizeof v, "%.*s", (int)strcspn(w, "\r\n"), w);
+    if (parse(&table[WAKE_SOUND], v, &x) || x) return 0;
+    for (size_t i = 0; i < sizeof wake_sound_covered / sizeof *wake_sound_covered; i++) {
+        snprintf(key, sizeof key, "%s=", table[wake_sound_covered[i]].name);
+        if (text_line(text, key)) return 0;
+    }
+    return 1;
 }
 
 int settings_apply_text(const char *text, char *err, size_t errsz)
@@ -599,7 +748,7 @@ int settings_apply_text(const char *text, char *err, size_t errsz)
     int applied = 0; size_t en = 0;
     if (errsz) err[0] = 0;
     for (int pass = 0; pass < 2; pass++) for (const char *p = text; *p; ) {
-        char line[200], *eq, *v; size_t l = strcspn(p, "\n");
+        char line[SETTINGS_LINE_MAX], *eq, *v; size_t l = strcspn(p, "\n");
         snprintf(line, sizeof line, "%.*s", (int)(l < sizeof line - 1 ? l : sizeof line - 1), p);
         p += l + (p[l] == '\n');
         line[strcspn(line, "\r")] = 0;
@@ -612,5 +761,9 @@ int settings_apply_text(const char *text, char *err, size_t errsz)
         if (!settings_set(k, v, e, sizeof e)) applied++;
         else if (en < errsz) en += (size_t)snprintf(err + en, errsz - en, "%s\n", e);
     }
+    /* imported (the page's Import, setup.sh --preset), such an export leaves this Echo as quiet as the one it came from,
+     * as settings_load does for a config of then.  A wake_sound line sent alone (the page's switch, Compare & copy's
+     * changed rows) has no export's first line, and a newer export lists the four */
+    if (export_from_before_switches(text)) { int n = wake_sound_was_all(); if (n) { applied += n; settings_save(); } }
     return applied;
 }

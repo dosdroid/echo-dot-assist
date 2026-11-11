@@ -27,7 +27,8 @@
  *   arbitration      "Join arbitration network" switch and "Arbitration peers"; the action "arbitration_key" (Home
  *                    Assistant names it esphome.<node>_arbitration_key) through which other Echos hand over their
  *                    network key, and the HomeassistantActionRequest with which this one hands over its own (arb.c)
- *   bluetooth proxy  LE scanning with raw advertisements, GATT connections to up to 3 devices at a time, pairing (ble.c)
+ *   bluetooth proxy  LE scanning with raw advertisements, GATT connections to up to 3 devices at a time, pairing (ble.c);
+ *                    feature bluetooth_proxy, on by default
  *   bluetooth speaker  a switch opens the pairing window (a2dp.c).  The other way, playing to a Bluetooth speaker: a
  *              switch searches for one and pairs it, another plays on it, a text sensor says how it is, a number holds its
  *              latency for Sendspin (a2dp.c, btout.c).  A phone connecting is announced by asking Home
@@ -83,6 +84,7 @@
 #include "hash.h"
 #include "https.h"
 #include "noise.h"
+#include "pb.h"
 #include "sendspin.h"
 #include "clock.h"
 #include "update.h"
@@ -131,7 +133,7 @@ enum { KEY_NOISE = 2, KEY_MIC_LEVEL, KEY_MULT, KEY_MUTE, KEY_WAKE_SOUND, KEY_SEN
        KEY_TIMER_RINGING, KEY_TIMER_NAMES, KEY_DROPIN_SERVICE, KEY_DROPIN_STATE, KEY_DROPIN_PEER, KEY_DROPIN_END, KEY_RESTART,
        KEY_DROPIN_RESULT, KEY_TIMER_STOP, KEY_BUTTON, KEY_LIGHT, KEY_ASSIST_VOLUME, KEY_SOUNDS_VOLUME, KEY_TIMER_VOLUME,
        KEY_CALL_VOLUME, KEY_WAKE, KEY_RING_FILL, KEY_RING_ROTATION, KEY_RING_LEDS, KEY_LAST_HEARD, KEY_LAST_REPLY,
-       KEY_NEXT_TIMER, KEY_NEXT_TIMER_NAME, KEY_NEXT_TIMER_LENGTH };
+       KEY_NEXT_TIMER, KEY_NEXT_TIMER_NAME, KEY_NEXT_TIMER_LENGTH, KEY_SCR_AUTO, KEY_SCR_LEVEL, KEY_SCR_ADJUST };
 enum { MP_KEY = 1, MP_IDLE = 1, MP_PLAYING = 2, MP_CMD_STOP = 2, MP_CMD_MUTE = 3, MP_CMD_UNMUTE = 4 };
 #define MEDIA_RATE 48000        /* what we ask Home Assistant to transcode announcements and media to: WAV mono s16 */
 
@@ -147,52 +149,15 @@ static __thread int reply_fd = -1;      /* the client whose request this thread 
 static int cancelled;                   /* lock held: the user cancelled the run; its events are dropped.  2: a new run
                                          * was asked for, whose RUN_START ends that (TCP keeps the order) */
 static int tts_expected;                /* lock held: the reply is being fetched or played; RUN_END must not end the pipeline */
+static int stt_run;                     /* lock held: the run asked for starts at STT (local wake word, a follow-up): the
+                                         * request begins at its RUN_START, not at a WAKE_WORD_END it never gets */
 static char tts_url[1024];              /* lock held: reply URL of the running pipeline (known from RUN_START with streaming TTS) */
 static int announcing, media_playing;   /* lock held */
 static void announce_done(void);
 static atomic_int media_busy;
 static struct media_job *media_cur;    /* lock held: the job holding media_busy, for cancel() */
 
-/* ---------------------------------------------------------------- protobuf */
-
-struct pb { unsigned char *p; size_t n, cap; };
-
-static void pb_raw(struct pb *b, const void *d, size_t n) { if (b->n + n <= b->cap) { memcpy(b->p + b->n, d, n); b->n += n; } }
-static void pb_varint(struct pb *b, uint64_t v) { unsigned char c; do { c = v & 0x7f; v >>= 7; if (v) c |= 0x80; pb_raw(b, &c, 1); } while (v); }
-static void pb_uint(struct pb *b, int f, uint64_t v) { if (v) { pb_varint(b, f << 3); pb_varint(b, v); } }
-static void pb_bytes(struct pb *b, int f, const void *d, size_t n) { if (n) { pb_varint(b, f << 3 | 2); pb_varint(b, n); pb_raw(b, d, n); } }
-static void pb_str(struct pb *b, int f, const char *s) { pb_bytes(b, f, s, strlen(s)); }
-static void pb_sint(struct pb *b, int f, int32_t v) { pb_uint(b, f, (uint32_t)v << 1 ^ (uint32_t)(v >> 31)); }   /* zigzag */
-static void pb_fixed32(struct pb *b, int f, uint32_t v) { pb_varint(b, f << 3 | 5); pb_raw(b, &v, 4); }      /* little endian host */
-static void pb_float(struct pb *b, int f, float v) { uint32_t u; memcpy(&u, &v, 4); pb_fixed32(b, f, u); }
-
-struct pbf { unsigned field, wire; uint64_t v; const unsigned char *data; size_t len; };
-
-static int pb_next(const unsigned char **p, const unsigned char *end, struct pbf *f)
-{
-    uint64_t k = 0, v = 0; int sh = 0;
-    if (*p >= end) return 0;
-    while (*p < end) { unsigned char c = *(*p)++; k |= (uint64_t)(c & 0x7f) << sh; sh += 7; if (!(c & 0x80)) break; }
-    f->field = k >> 3; f->wire = k & 7; f->v = 0; f->data = NULL; f->len = 0;
-    switch (f->wire) {
-    case 0: for (sh = 0; *p < end;) { unsigned char c = *(*p)++; v |= (uint64_t)(c & 0x7f) << sh; sh += 7; if (!(c & 0x80)) break; } f->v = v; break;
-    case 1: if (end - *p < 8) return 0; *p += 8; break;
-    case 2:
-        for (sh = 0; *p < end;) { unsigned char c = *(*p)++; v |= (uint64_t)(c & 0x7f) << sh; sh += 7; if (!(c & 0x80)) break; }
-        if ((uint64_t)(end - *p) < v) return 0;
-        f->data = *p; f->len = v; *p += v;
-        break;
-    case 5: if (end - *p < 4) return 0; { uint32_t u; memcpy(&u, *p, 4); f->v = u; } *p += 4; break;
-    default: return 0;
-    }
-    return 1;
-}
-
-static void pbf_str(const struct pbf *f, char *out, size_t outsz)
-{
-    size_t n = f->len < outsz - 1 ? f->len : outsz - 1;
-    memcpy(out, f->data, n); out[n] = 0;
-}
+/* ---------------------------------------------------------------- framing (the messages' protobuf: pb.h) */
 
 static int client_of(int fd)            /* lock held */
 {
@@ -439,6 +404,10 @@ static void send_setting(int key)       /* lock held */
     case KEY_ASSIST_VOLUME: case KEY_SOUNDS_VOLUME: case KEY_TIMER_VOLUME: case KEY_CALL_VOLUME:     /* VOL_* order */
         pb_float(&b, 2, core_kind_volume(key - KEY_ASSIST_VOLUME, -1)); send_state(NUMBER_STATE, &b); break;
     case KEY_LED_BRIGHTNESS: { int v = core_led_brightness(-1); if (v >= 0) { pb_float(&b, 2, v); send_state(NUMBER_STATE, &b); } } break;
+    case KEY_SCR_AUTO: pb_uint(&b, 2, settings_on("screen_brightness_auto")); send_state(SWITCH_STATE, &b); break;
+    case KEY_SCR_LEVEL: case KEY_SCR_ADJUST:
+        pb_float(&b, 2, settings_get(settings_find(key == KEY_SCR_LEVEL ? "screen_brightness" : "screen_brightness_adjust")));
+        send_state(NUMBER_STATE, &b); break;
     case KEY_BT_OUT_SEARCH: if (ble_present()) { pb_uint(&b, 2, a2dp_out_searching()); send_state(SWITCH_STATE, &b); } break;
     case KEY_BT_OUT: if (ble_present()) { pb_uint(&b, 2, a2dp_out_enabled()); send_state(SWITCH_STATE, &b); } break;
     case KEY_BT_OUT_DELAY: if (ble_present()) { pb_float(&b, 2, a2dp_out_delay(-1)); send_state(NUMBER_STATE, &b); } break;
@@ -531,6 +500,7 @@ static void send_light_states(void)     /* lock held */
     sent_level = core_led_brightness(-1); level_at = time(NULL);
     send_setting(KEY_LED_AUTO); send_setting(KEY_LED_BRIGHTNESS); send_setting(KEY_LIGHT);
     send_setting(KEY_RING_FILL); send_setting(KEY_RING_ROTATION);
+    send_setting(KEY_SCR_AUTO); send_setting(KEY_SCR_LEVEL); send_setting(KEY_SCR_ADJUST);
 }
 
 static void send_light_entities(void)
@@ -563,6 +533,18 @@ static void send_light_entities(void)
     { PB(b, 160); pb_str(&b, 1, "led_brightness"); pb_fixed32(&b, 2, KEY_LED_BRIGHTNESS); pb_str(&b, 3, "LED brightness");
       pb_str(&b, 5, "mdi:brightness-6"); pb_float(&b, 6, 0); pb_float(&b, 7, 100); pb_float(&b, 8, 1); pb_uint(&b, 10, 1);
       pb_str(&b, 11, "%"); pb_uint(&b, 12, 2); send_msg(LIST_NUMBER, &b); }
+    /* the Echo Show's backlight as stock's Display settings: adaptive (Amazon's lux curve, shifted by the adjustment) or
+     * a level of its own (settings.c backlight_auto; root's main.sh sets Android's settings from state/config) */
+    if (listed(KEY_SCR_AUTO)) {
+        { PB(b, 160); pb_str(&b, 1, "adaptive_brightness"); pb_fixed32(&b, 2, KEY_SCR_AUTO); pb_str(&b, 3, "Adaptive brightness");
+          pb_str(&b, 5, "mdi:brightness-auto"); pb_uint(&b, 8, 1); send_msg(LIST_SWITCH, &b); }
+        { PB(b, 160); pb_str(&b, 1, "screen_brightness"); pb_fixed32(&b, 2, KEY_SCR_LEVEL); pb_str(&b, 3, "Screen brightness");
+          pb_str(&b, 5, "mdi:brightness-6"); pb_float(&b, 6, 1); pb_float(&b, 7, 100); pb_float(&b, 8, 1); pb_uint(&b, 10, 1);
+          pb_str(&b, 11, "%"); pb_uint(&b, 12, 2); send_msg(LIST_NUMBER, &b); }
+        { PB(b, 160); pb_str(&b, 1, "adaptive_brightness_adjustment"); pb_fixed32(&b, 2, KEY_SCR_ADJUST);
+          pb_str(&b, 3, "Adaptive brightness adjustment"); pb_str(&b, 5, "mdi:brightness-percent"); pb_float(&b, 6, -100);
+          pb_float(&b, 7, 100); pb_float(&b, 8, 1); pb_uint(&b, 10, 1); pb_uint(&b, 12, 2); send_msg(LIST_NUMBER, &b); }
+    }
     /* separate volumes (main.c): the three beside the media player's, which is the music's; no entity category, controls
      * like the media player's volume */
     static const char *const vol_ids[VOL_KINDS] = { "assistant_volume", "sounds_volume", "timer_volume", "call_volume" };
@@ -595,6 +577,7 @@ static int listed(int key)
     case KEY_WHISPERED: return core_whisper_model() && settings_on("whisper_detection");
     case KEY_WIFI_MOTION: case KEY_WIFI_MOTION_SENS: return wifimotion_present() && settings_on("wifi_motion");
     case KEY_LED_AUTO: return have_auto;
+    case KEY_SCR_AUTO: case KEY_SCR_LEVEL: case KEY_SCR_ADJUST: return settings_find("screen_brightness_auto") != NULL;
     case KEY_LUX: return have_light && settings_on("light_sensor");
     case KEY_LIGHT: return ring_custom();
     case KEY_RING_FILL: case KEY_RING_ROTATION: case KEY_RING_LEDS: return ring_per_led();
@@ -790,6 +773,14 @@ static void on_setting(unsigned type, const unsigned char *p, const unsigned cha
     else if (type == NUMBER_COMMAND && key == KEY_LED_BRIGHTNESS) {                  /* a level of its own: auto off, or it moves */
         core_led_brightness(num < 0 ? 0 : (int)lroundf(num)); settings_save(); send_setting(KEY_LED_AUTO); send_setting(key); return;
     }
+    else if (type == SWITCH_COMMAND && key == KEY_SCR_AUTO && listed(key)) {                  /* saved, shown: settings.c */
+        char e[80]; settings_set("screen_brightness_auto", on ? "on" : "off", e, sizeof e); return;
+    }
+    else if (type == NUMBER_COMMAND && (key == KEY_SCR_LEVEL || key == KEY_SCR_ADJUST) && listed(key)) {
+        int lo = key == KEY_SCR_LEVEL ? 1 : -100, n = (int)lroundf(num); char v[8], e[80];
+        snprintf(v, sizeof v, "%d", n < lo ? lo : n > 100 ? 100 : n);
+        settings_set(key == KEY_SCR_LEVEL ? "screen_brightness" : "screen_brightness_adjust", v, e, sizeof e); return;
+    }
     else if (type == NUMBER_COMMAND && key >= KEY_ASSIST_VOLUME && key <= KEY_CALL_VOLUME && listed(key)) {   /* saved, shown: settings.c */
         static const char *const names[] = { "assistant_volume", "sounds_volume", "timer_volume", "call_volume" };
         char v[8], e[80]; snprintf(v, sizeof v, "%d", num < 0 ? 0 : num > 100 ? 100 : (int)lroundf(num));
@@ -864,7 +855,10 @@ static void on_light(const unsigned char *p, const unsigned char *end)      /* l
 
 struct media_job {
     char url[2][1024]; int announce, start_conversation, media;     /* media: play_media, at the main volume */
-    int fd, aborted;                    /* lock held.  aborted: its run was cancelled; it plays nothing and touches no state */
+    int fd, aborted;                    /* lock held.  aborted: let go of by cancel() or media_stop_early(), which set
+                                         * the state; the thread queues no more audio (tts_begin refuses, the decoders
+                                         * stop: job_gone) and only calls core_tts_abandoned if its audio had begun */
+    int began;                          /* lock held: its audio is queued (tts_begin) */
 };
 
 static void send_mp_state(void)         /* lock held */
@@ -908,24 +902,35 @@ static int http_get(const char *url)    /* returns a socket positioned at the bo
     return http_get_host(host, port, path ? path : "/");
 }
 
-static int tts_begin(struct media_job *job, unsigned rate, unsigned ch)    /* -1: cancelled, the reply must not play */
+static int tts_begin(struct media_job *job, unsigned rate, unsigned ch)    /* -1: let go of, it must not play */
 {
     pthread_mutex_lock(&core_lock);
     int ok = !job->aborted;
-    if (ok) core_tts_begin(rate, ch, job->media);
+    if (ok) { job->began = 1; core_tts_begin(rate, ch, job->media); }
     pthread_mutex_unlock(&core_lock);
     return ok ? 0 : -1;
 }
 
-static void feed(const void *pcm, size_t len)       /* queue with back pressure */
+/* Let go of: the decoders stop.  A shut socket still hands over what it had buffered, and play_mp3 decodes what it read
+ * ahead (up to 32 KB), which went into the queue after cancel() and before the next run's reply */
+static int job_gone(struct media_job *job)
 {
-    core_tts_data(pcm, len);
-    while (core_tts_queued() > 256 * 1024 && !core_tts_flushing()) usleep(50000);
+    pthread_mutex_lock(&core_lock); int gone = job->aborted; pthread_mutex_unlock(&core_lock);
+    return gone;
 }
 
+static void feed(struct media_job *job, const void *pcm, size_t len)       /* queue with back pressure */
+{
+    if (job_gone(job)) return;          /* let go of while its read waited */
+    core_tts_data(pcm, len);
+    while (core_tts_queued() > 256 * 1024 && !core_tts_flushing() && !job_gone(job)) usleep(50000);
+}
+
+/* The decoders' buffers are each call's own, never static: a job that was let go of (cancel(), media_stop_early()) can
+ * still be reading what its socket had buffered while the next job's thread decodes */
 static int play_wav(struct media_job *job, int fd, const unsigned char *head, size_t have)
 {
-    unsigned char ck[8], fmt[16]; unsigned rate = 0, ch = 0, bits = 0; static unsigned char buf[8192];
+    unsigned char ck[8], fmt[16], buf[8192]; unsigned rate = 0, ch = 0, bits = 0;
     (void)head; (void)have;                             /* the 12 byte RIFF/WAVE header, already consumed */
     for (;;) {
         if (read_full(fd, ck, 8) != 8) return -1;
@@ -941,9 +946,9 @@ static int play_wav(struct media_job *job, int fd, const unsigned char *head, si
     fprintf(stderr, "media: WAV %u Hz x%u\n", rate, ch);
     if (tts_begin(job, rate, ch) < 0) return -1;
     size_t odd = 0;
-    for (ssize_t r; !core_tts_flushing() && (r = read(fd, buf + odd, sizeof buf - odd)) > 0; ) {
+    for (ssize_t r; !core_tts_flushing() && !job_gone(job) && (r = read(fd, buf + odd, sizeof buf - odd)) > 0; ) {
         size_t n = odd + r, use = n & ~(size_t)(2 * ch - 1);        /* whole frames only */
-        feed(buf, use);
+        feed(job, buf, use);
         odd = n - use; memmove(buf, buf + use, odd);
     }
     return 0;
@@ -953,14 +958,16 @@ static int play_wav(struct media_job *job, int fd, const unsigned char *head, si
  * voice pipeline has run), so that has to play too. */
 static int play_mp3(struct media_job *job, int fd, const unsigned char *head, size_t have)
 {
-    static unsigned char in[32768]; static mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME];
-    static mp3dec_t dec; mp3dec_frame_info_t info; size_t n = have; int began = 0, eof = 0;
+    struct { unsigned char in[32768]; mp3d_sample_t pcm[MINIMP3_MAX_SAMPLES_PER_FRAME]; mp3dec_t dec; } *m = malloc(sizeof *m);
+    mp3dec_frame_info_t info; size_t n = have; int began = 0, eof = 0;
+    if (!m) return -1;
+    unsigned char *in = m->in; mp3d_sample_t *pcm = m->pcm;
     memcpy(in, head, have);
-    mp3dec_init(&dec);
-    while (!core_tts_flushing()) {
-        while (!eof && n < sizeof in) { ssize_t r = read(fd, in + n, sizeof in - n); if (r <= 0) eof = 1; else n += r; }
+    mp3dec_init(&m->dec);
+    while (!core_tts_flushing() && !job_gone(job)) {
+        while (!eof && n < sizeof m->in) { ssize_t r = read(fd, in + n, sizeof m->in - n); if (r <= 0) eof = 1; else n += r; }
         if (!n) break;
-        int samples = mp3dec_decode_frame(&dec, in, n, pcm, &info);
+        int samples = mp3dec_decode_frame(&m->dec, in, n, pcm, &info);
         if (!info.frame_bytes) { if (eof) break; n = 0; continue; }     /* no sync in the whole buffer */
         if (samples > 0) {
             if (!began) {
@@ -968,10 +975,11 @@ static int play_mp3(struct media_job *job, int fd, const unsigned char *head, si
                 if (tts_begin(job, info.hz, info.channels) < 0) break;
                 began = 1;
             }
-            feed(pcm, (size_t)samples * info.channels * 2);
+            feed(job, pcm, (size_t)samples * info.channels * 2);
         }
         n -= info.frame_bytes; memmove(in, in + info.frame_bytes, n);
     }
+    free(m);
     if (!began) fprintf(stderr, "media: no MP3 audio found\n");
     return began ? 0 : -1;
 }
@@ -989,16 +997,17 @@ static void *media_thread(void *arg)
 {
     struct media_job *job = arg; int ok = 0, began = 0;
     for (int i = 0; i < 2; i++) {
-        if (!job->url[i][0] || core_tts_flushing()) continue;
+        pthread_mutex_lock(&core_lock); int gone = job->aborted; pthread_mutex_unlock(&core_lock);
+        if (!job->url[i][0] || gone || core_tts_flushing()) continue;      /* gone: not the message after its chime either */
         int fd = http_get(job->url[i]);
         if (fd < 0) continue;
-        pthread_mutex_lock(&core_lock); job->fd = fd; int gone = job->aborted; pthread_mutex_unlock(&core_lock);
+        pthread_mutex_lock(&core_lock); job->fd = fd; gone = job->aborted; pthread_mutex_unlock(&core_lock);
         if (!gone && play_url(job, fd) == 0) { began = 1; if (i == 1) ok = 1; }
         pthread_mutex_lock(&core_lock); job->fd = -1; pthread_mutex_unlock(&core_lock);
         close(fd);
     }
     pthread_mutex_lock(&core_lock);
-    if (job->aborted) {                 /* cancel() has let go of it: a new run and its reply may be under way already */
+    if (job->aborted) {                 /* let go of: a new run and its reply, or new media, may be under way already */
         if (began) core_tts_abandoned();
         pthread_mutex_unlock(&core_lock);
         free(job);
@@ -1046,6 +1055,11 @@ static void media_start(const char *url0, const char *url1, int announce, int st
  * its connections are closed, as ESPHome does. */
 
 static int ble_mode = BLE_ACTIVE;       /* lock held */
+
+/* The proxy only while its feature is on (issue #152).  Off, the device info names none and every request of it is
+ * refused; switching it closes the links (entities_changed), and the last client leaving ends the scan and the
+ * connections below, as Home Assistant leaving does */
+static int bt_proxy(void) { return ble_present() && settings_bt_proxy(); }
 
 static int ble_subscribers(void)        /* lock held */
 {
@@ -1276,7 +1290,8 @@ static void start(void)
     PB(b, 96);
     tts_expected = 0; tts_url[0] = 0; if (cancelled) cancelled = 2;
     pb_uint(&b, 1, 1);                                  /* start */
-    pb_uint(&b, 3, core_local_wake ? 1 : 3);            /* flags: USE_VAD, plus USE_WAKE_WORD when detection is remote */
+    stt_run = core_local_wake || core_follow_up();
+    pb_uint(&b, 3, stt_run ? 1 : 3);                    /* flags: USE_VAD, plus USE_WAKE_WORD when detection is remote (not for a follow-up) */
     /* audio settings: neutral.  Home Assistant ignores them today; the gain is applied here (micgain.h), and absent they
      * would read as volume multiplier 0 should it ever start using them */
     { PB(as, 8); pb_float(&as, 3, 1.0f); pb_varint(&b, 4 << 3 | 2); pb_varint(&b, as.n); pb_raw(&b, as.p, as.n); }
@@ -1366,8 +1381,9 @@ static void on_event(const unsigned char *p, const unsigned char *end)
     if (type == EV_RUN_START || type == EV_ERROR) cancelled = 0;
     /* "Last heard" and "Last reply": a new request clears both, so the same request said twice is a change Home Assistant
      * records (it drops a state equal to the last).  With the wake word at Home Assistant a run is open long before anyone
-     * speaks, and one listens beside each reply (main.c wake_listen): there the request starts at the wake word */
-    int fresh = core_local_wake ? type == EV_RUN_START : type == EV_WAKE_END;
+     * speaks, and one listens beside each reply (main.c wake_listen): there the request starts at the wake word.  A
+     * follow-up to a question has no wake word stage, so it starts at RUN_START there too */
+    int fresh = stt_run ? type == EV_RUN_START : type == EV_WAKE_END;
     if (listed(KEY_LAST_HEARD) && (fresh || type == EV_STT_END || type == EV_TTS_START)) {
         if (type != EV_TTS_START) { state_text(last_heard, sizeof last_heard, type == EV_STT_END ? said : ""); send_setting(KEY_LAST_HEARD); }
         if (type != EV_STT_END) { state_text(last_reply, sizeof last_reply, type == EV_TTS_START ? said : ""); send_setting(KEY_LAST_REPLY); }
@@ -1377,10 +1393,12 @@ static void on_event(const unsigned char *p, const unsigned char *end)
     case EV_STT_START:  core_set_state(LISTENING); break;
     case EV_VAD_END:    core_mic_off(); if (core_state() == LISTENING) core_set_state(THINKING); break;
     case EV_STT_END:    fprintf(stderr, "transcript: %s\n", text);
-        if (core_transcript(text)) break;                   /* "stop" to a ring or music: the run is cancelled */
+        /* "stop" to a ring or music: the run is cancelled, and the word is not put on the screen (what showed goes) */
+        if (core_transcript(text)) { screen_words(SCREEN_WORDS_RUN, NULL); break; }
+        screen_words(SCREEN_WORDS_HEARD, said);
         core_mic_off(); if (core_state() == LISTENING) core_set_state(THINKING); break;
     case EV_INTENT_END: if (cont) core_restart_after(); break;
-    case EV_TTS_START:  fprintf(stderr, "reply: %s\n", text); break;
+    case EV_TTS_START:  fprintf(stderr, "reply: %s\n", text); screen_words(SCREEN_WORDS_REPLY, said); break;
     case EV_INTENT_PROGRESS: if (!stream_now) break;    /* streaming TTS: the URL from RUN_START can be fetched already */
         /* fall through */
     case EV_TTS_END:
@@ -1413,6 +1431,7 @@ static void on_event(const unsigned char *p, const unsigned char *end)
 
 static void on_timer(const unsigned char *p, const unsigned char *end)
 {
+    /* VoiceAssistantTimerEventResponse: event_type, timer_id, name, total_seconds, seconds_left, is_active */
     struct pbf f; unsigned type = 0, total = 0, left = 0, active = 0; char tname[64] = "", id[40] = "";
     while (pb_next(&p, end, &f)) {
         if (f.field == 1) type = f.v; else if (f.field == 2 && f.data) pbf_str(&f, id, sizeof id);
@@ -1441,6 +1460,25 @@ static void on_announce(const unsigned char *p, const unsigned char *end)
     media_start(pre, media, 1, conv, 0, 0);
 }
 
+/* Lock held.  The media player's stop before the job's audio began (on_mp_command): it is let go of as cancel() does,
+ * and what its failed fetch would have done is done now (announcement not played, player idle, pipeline finished,
+ * media_busy free).  Not left to its thread: http_get returns only once the headers came, which Home Assistant may hold
+ * back while the TTS renders (15 s a read, SO_RCVTIMEO), so there is no socket to shut meanwhile, and media_busy would
+ * refuse what is sent right after the stop.  The thread plays nothing (tts_begin refuses) and touches no state.
+ * A reply's tts_expected stays set until the next run, as after a failed fetch: a TTS_END of this run (the reply was
+ * streamed from INTENT_PROGRESS) must not fetch it again */
+static void media_stop_early(void)
+{
+    struct media_job *job = media_cur;
+    job->aborted = 1;
+    if (job->fd >= 0) shutdown(job->fd, SHUT_RDWR);
+    media_cur = NULL;
+    if (job->announce) { PB(b, 8); pb_uint(&b, 1, 0); send_va(VA_ANNOUNCE_FINISHED, &b); announcing = 0; announce_done(); }
+    media_playing = 0; send_mp_state();
+    core_pipeline_finish();
+    atomic_store(&media_busy, 0);
+}
+
 static void on_mp_command(const unsigned char *p, const unsigned char *end)
 {
     struct pbf f; static char url[1024]; int has_cmd = 0, cmd = 0, has_vol = 0, has_url = 0, announcement = 0; float vol = 0;
@@ -1455,7 +1493,14 @@ static void on_mp_command(const unsigned char *p, const unsigned char *end)
         case 9: announcement = f.v != 0; break;        /* tts.speak and play_media's announce: speech, not music */
     }
     if (has_vol) core_set_volume((int)(vol * 100 + 0.5f));
-    if (has_cmd && cmd == MP_CMD_STOP && media_playing) core_tts_flush();
+    /* The flush drops what is queued up to the job's Q_STOP, which clears it (main.c playback_thread).  A job whose audio
+     * has not begun (the fetch still waits on Home Assistant rendering the TTS) queues none when it then fails or is MP3
+     * (play_mp3 does not start under a flush): the flush stayed set and dropped every reply, announcement and media
+     * after it until hassmic restarted.  Such a job is let go of instead */
+    if (has_cmd && cmd == MP_CMD_STOP && media_playing) {
+        if (media_cur && !media_cur->began) media_stop_early();
+        else core_tts_flush();
+    }
     if (has_cmd && cmd == MP_CMD_STOP) core_alarm_stop("media player stop");     /* as "Stop ringing" does, for automations */
     if (has_url && url[0]) media_start("", url, 0, 0, 0, !announcement);
     if (has_cmd && !has_url) send_mp_state();
@@ -1470,7 +1515,7 @@ static void send_device_info(void)
     pb_str(&b, 6, board.model); pb_str(&b, 8, board.project); pb_str(&b, 9, VERSION);
     pb_str(&b, 12, "Amazon"); pb_str(&b, 13, core_name);
     if (core_web_port) pb_uint(&b, 10, core_web_port); /* webserver_port: HA links the device page to http://<host>:<it> */
-    if (ble_present()) { pb_uint(&b, 11, 5); pb_uint(&b, 15, BLE_FEATURES); pb_str(&b, 18, ble_mac()); }    /* 11: legacy "active connections" */
+    if (bt_proxy()) { pb_uint(&b, 11, 5); pb_uint(&b, 15, BLE_FEATURES); pb_str(&b, 18, ble_mac()); }    /* 11: legacy "active connections" */
     pb_uint(&b, 17, FEAT_VOICE | FEAT_API_AUDIO | FEAT_TIMERS | FEAT_ANNOUNCE | FEAT_START_CONVERSATION);      /* no SPEAKER: see top */
     pb_uint(&b, 19, 1);                                 /* api_encryption_supported */
     pb_uint(&b, 26, !have_key);                         /* api_encryption_provisionable: Home Assistant sets the key */
@@ -1685,19 +1730,20 @@ static int handle(unsigned type, const unsigned char *p, size_t len)
     case VA_SET_CONFIG:    if (core_local_wake) on_va_set_config(p, end); break;
     case MEDIA_PLAYER_COMMAND: on_mp_command(p, end); break;
     case BLE_SUBSCRIBE: case BLE_UNSUBSCRIBE:
-        if (c < 0 || !ble_present()) break;
+        if (c < 0 || !bt_proxy()) break;
         clients[c].ble = type == BLE_SUBSCRIBE;         /* flags ignored: raw advertisements are all we send */
         ble_update(); if (type == BLE_SUBSCRIBE) send_scanner_state();
         break;
     case BLE_SCANNER_SET_MODE:
+        if (!bt_proxy()) break;
         ble_mode = BLE_PASSIVE;                         /* the zero value: an empty message */
         while (pb_next(&p, end, &f)) if (f.field == 1 && f.v == BLE_ACTIVE) ble_mode = BLE_ACTIVE;
         ble_update(); send_scanner_state();
         break;
-    case BLE_CONN_FREE_REQ: if (c >= 0 && ble_present()) { clients[c].ble_free = 1; send_slots(1); } break;
+    case BLE_CONN_FREE_REQ: if (c >= 0 && bt_proxy()) { clients[c].ble_free = 1; send_slots(1); } break;
     case BLE_DEVICE_REQ: case BLE_SERVICES_REQ: case BLE_READ_REQ: case BLE_READ_DESC_REQ: case BLE_WRITE_REQ:
     case BLE_WRITE_DESC_REQ: case BLE_NOTIFY_REQ:
-        if (ble_present() && c >= 0) { clients[c].ble_user = 1; on_ble_request(type, p, end); }
+        if (bt_proxy() && c >= 0) { clients[c].ble_user = 1; on_ble_request(type, p, end); }
         break;
     case SET_KEY_REQ: {
         /* Without a key: from an encrypted (zero-PSK) connection only, so the key never crosses the network readable.
@@ -1814,9 +1860,10 @@ done:
     clients[slot].fd = -1; clients[slot].states = clients[slot].enc = clients[slot].keyed = clients[slot].ble = clients[slot].ble_free = clients[slot].ble_user = clients[slot].actions = clients[slot].ha_states = 0; n = 0;
     ble_update();
     if (!ble_subscribers()) {                           /* nobody left to use them */
-        int users = 0; uint64_t a[BLE_MAX_CONN];
+        int users = 0;
         for (int i = 0; i < MAX_CLIENTS; i++) users += clients[i].fd >= 0 && (clients[i].ble_free || clients[i].ble_user);
-        if (!users) for (int i = 0, k = ble_connections(a); i < k; i++) ble_disconnect(a[i]);
+        /* a connect still queued too: ble_connections() lists it only once ble.c's thread took it */
+        if (!users) ble_disconnect_all();
     }
     memset(&clients[slot].tx, 0, sizeof clients[slot].tx); memset(&clients[slot].rx, 0, sizeof clients[slot].rx);
     for (int i = 0; i < MAX_CLIENTS; i++) n += clients[i].fd >= 0;

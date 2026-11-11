@@ -2,7 +2,161 @@
 
 What changed for people using the Echo, newest first. Details and measurements are in [PLAN.md](PLAN.md).
 
+## 2026-11-11
+
+- **A note of your own on each Echo, and your other Echos one click away on the settings page (issue #153).** Several
+  Echos of one model differed only by the six characters at the end of their names. Click "Add a note" under the
+  name at the top of the menu (or the Note row on the System page) and write where it stands, say "Kitchen, by the
+  window". The note shows under the name there, in the browser tab's title, on your other Echos' pages and on the
+  login page, so you know which Echo's button to press. Anyone on your network can read it, as the name. It stays
+  with that Echo: not in the settings file, and a factory reset removes it. The name at the top now opens a list of
+  your other Echos with their notes: pick one and its settings page opens on the same page you are on. Suggested by
+  baudneo.
+
+## 2026-11-10
+
+- **"Stop" can end a timer ringing on another Echo (issue #161), optional and off by default.** A ringing Echo
+  always wins the wake word round, but only if it heard the wake word itself. From the next room, or over its own
+  ring, it may not: then another Echo got the "stop", paused its own music or handed the word to Home Assistant, and
+  the timer rang on. New setting "A stop another Echo heard ends the ring" (Voice page, Timers card,
+  `timer_stop_from_others`): switched on, that Echo's ring stops on "<wake word>, stop" said to any Echo of its
+  arbitration network, as it does when you say it to the ringing Echo itself. The Echo that heard you then leaves its
+  music alone and starts no request. It reaches the whole house: a "stop" in the bedroom ends the kitchen's timer. A
+  "stop" that has something to end where it was heard (a ring, a reply, a call there) ends only that, and "Any request
+  stops a ringing timer" stays with the Echo that heard you. The Echos tell each other over their own network, without
+  Home Assistant; the Echo that hears you needs this version too. The log of the one that heard says
+  `stop: nothing here, <name> rings: told to stop`, the ringing one's `alarm: off (stop heard by <name>)`. Not in
+  Kiosk Satellite's arbitration mode. Suggested by redeye86.
+- **Music also drops on the other Echos that heard you (issue #165).** With two Echos in one room playing the same
+  music, only the one answering turned its music down; the other played on at full volume over your command and the
+  reply. Now every Echo that heard the wake word turns its music down by its own "Music ducking" until the answering
+  Echo is done. An Echo in another room that did not hear you plays on. The Echos tell each other over their own
+  network, with no Home Assistant automation and no change to the volume itself: Music Assistant and the light ring
+  see nothing of it. New setting "Duck for other Echos" (Sound page, `duck_for_others`, on by default); it needs
+  wake word arbitration on. Both Echos need this version. A follow-up question keeps them down for your answer too;
+  music Home Assistant plays on the answering Echo afterwards (a radio you asked for) does not. If the "done" message
+  is lost, the music comes back after about 7 seconds. The answering Echo's own music now also drops from the wake word on rather than once the Echos have
+  agreed which one answers (up to a second later). Suggested by nima-1102.
+- **A freshly installed Echo went without the wake word aligners until its first update.** The files that find where
+  the wake word ends (since 2026-10-29) came with every update, but the installer (`scripts/setup.sh`,
+  `scripts/install-system.sh`, `scripts/install-boot.sh`) left them out. Such an Echo found the word's end by the
+  loudness alone, the rule the aligners replaced: on an Echo Dot 3 it took up to 0.36 s after Amazon's end of the word
+  for the word's tail and left it out of the request. The installer brings them now. An Echo installed since
+  2026-10-29 that has had no update since gets them with its next one, at once with `scripts/ota-push.sh`, or by
+  installing again; its log says `wake: ... aligned by ...` with them, only `wake: ... ms of the word's tail left out`
+  without. Where the system partition is nearly full, an update no longer takes them off one time and puts them back
+  the next: those already there stay. Found by derFinlay, who also wrote the first fix (#160).
+- **Echo Show 8 2nd gen: Adaptive colour can be switched off or on from the settings page.** Under **Screen**, the
+  **Brightness and colour** card has the stock display setting that warms the screen's colours with the room's
+  light, often turning a dashboard yellow at night. It is off by default; an explicit choice is kept across restarts.
+  Setup presets keep the choice even before the display service starts. The switch shows the device's confirmed
+  state and appears only while the display service is available. Returning
+  to stock Alexa restores the original setting (issue #162).
+
+## 2026-11-09
+
+- **A stop from Home Assistant before the sound starts no longer leaves the Echo silent.** When the media player's
+  stop came while the Echo was still waiting for what to play (a `media_stop` right after `tts.speak` or a
+  `play_media`, or during a reply Home Assistant was still preparing), and that then failed to load or was an MP3,
+  the Echo played no reply, announcement or media again until hassmic restarted. Now the stop cancels only what was
+  on its way, at once: what is sent right after it plays.
+- **Debug access: revoking the browser that asked for it withdraws the request.** While Debug access waited for the
+  action button, revoking that browser's login on the settings page left the request waiting: the page still said so,
+  and the next press of the button opened adb over Wi-Fi for 30 minutes. Now the request goes with the login, and
+  that press does what the button does otherwise.
+- **Settings page: "Try again" after a login that was not approved works.** When the action button was not pressed
+  within the minute, or another browser asked at the same time, every new try from the same browser was refused at
+  once, with nothing on the ring for the button to approve, until another browser asked or the Echo restarted. Now
+  the next try waits for the button as the first one did. A browser whose login was revoked is asked for the button
+  again too, instead of showing "Logged in" over a page that loads nothing.
+- **The unlock and boot-root are now done by hand, as the XDA thread says, on every model.** The unlock tools
+  (kamakiri, amonet, saiyaku) and boot-root are R0rt1z2's, and with kamakiri-donut v1.1.0 he asks that they are only
+  ever run by hand, following his XDA thread, never from an installer or a script. The guided setup respects that: it
+  no longer asks for, unpacks, runs or installs them, and the model pages no longer copy their steps. At the unlock
+  step it shows the model's XDA thread; follow it in a terminal window of your own until TWRP is running, come back,
+  press Enter, and the setup checks that the Echo is on adb. It then puts the firmware on as before (Echo Dots, Echo 2,
+  Echo Input), and at the root step sends you to the thread again for boot-root: install it from TWRP as the thread
+  says, press Enter once Fire OS has started, and the setup checks for root over adb and goes on with the install.
+  The Echo Shows' root is this project's own boot image, as before. Stuck? Ask in the thread, with what the Echo did
+  and the tool's output or log. This replaces the setup's own words around amonet's unlock from earlier today (issue
+  #154). It also ends issue #156: the setup insisted on `kamakiri-donut-v1.0.0.zip`, which the thread no longer offers,
+  and refused v1.1.0; it now asks for no unlock file at all. kamakiri-donut v1.1.0 writes the same files to the Echo as
+  v1.0.0, so the warning about issue #112 stays as it was.
+- **Nothing of the XDA threads' files is used any more.** The setup took two programs out of `boot-root.zip`; it now
+  fetches them from where they were made: magiskpolicy (which adds this project's rules to the Echo's security policy)
+  from Magisk's own release, v30.7, the very same file; on the Echo Show 5 (both generations) and the Echo Show 8 1st
+  gen also adbd, now Google's own from its Android 7.1.1 emulator image (only 1.3 MB of it is downloaded). You no
+  longer download `boot-root.zip` for the setup: get it from the thread when the root step sends you there. The new
+  adbd on the Echo Shows has not been tried on a device yet.
+- **Windows: the setup no longer runs firebreak.** firebreak unlocked an Echo Dot 2 from Windows by running amonet,
+  so it goes for the same reason. On Windows every model, the Echo Dot 2 included, now needs an Echo that is unlocked
+  already (TWRP or Fire OS on adb); the setup does everything after that, and [the Windows guide](docs/WINDOWS.md) says
+  how.
+- **The Bluetooth proxy can be switched off (issue #152).** "Bluetooth proxy" (settings page, Features; on by default,
+  so nothing changes) stops Home Assistant from getting Bluetooth devices through this Echo: the Echo no longer says it
+  is a proxy, stops scanning and takes no connections. Disabling its Bluetooth entries in Home Assistant never did
+  that: advertisements kept arriving. Phones, a Bluetooth speaker and the setup from a phone work either way. Home
+  Assistant reconnects for a moment when you switch it, as with every feature.
+- **Double and triple press of the action button skip tracks.** New setting "Double and triple press of the action button"
+  (Voice page, `multi_press`, off by default; not on the Echo Shows, which have no action button): twice is next, three
+  times previous, for Music Assistant and for a phone over Bluetooth (AVRCP). Two or three presses act as one single press
+  when nothing plays, during a Drop In call (ringing included) and while a login waits for the button. While it is
+  on, a single press waits 450 ms to see whether more follow. Home Assistant's "Button" event fires for whatever acts
+  as a single press, never for a skip.
+- **Music ducking has a depth you can set.** While the assistant listens, thinks or speaks, music from Music Assistant
+  and from a phone over Bluetooth was always turned down by the same 15.6 dB (to a sixth), which over loud music or an
+  audiobook can leave too little of your voice for speech-to-text. The setting "Music ducking" (Sound page, `music_duck`,
+  0 to 60 dB, default 16 dB: about what it was) sets how far; 0 turns ducking off.
+- **Clearer unlock (issue #154).** Amazon's lock is opened by a script, amonet's fastbrick, which ended with "DO NOT
+  INTERRUPT IT" and "Press any key to exit...", and nobody could tell whether it was finished or whether a key would
+  stop it. The guided setup now says before the unlock how long it takes and what not to touch (the Echo's power and
+  USB cable, Ctrl+C, the window) until the sign it is over: the white ring on an Echo Dot 2 or Echo 2, TWRP on the
+  screen of an Echo Show. It asks for YES itself, answers the script's questions for it, says "hands off" while the
+  Echo finishes on its own, and says when the unlock worked. The model pages say the same for an unlock by hand.
+- **Echo Show: what you said and the reply on the screen.** "Speech on screen" (settings page, Screen; off by default)
+  shows your words and the assistant's answer in large letters over whatever the screen shows: the face, the music, or
+  an app such as Kiosk Satellite (not over the pulled-down menu). They fade 8 seconds after the answer ("Speech stays
+  for": any number of seconds, or until the next request). A "stop" the Echo carries out itself (a ringing timer,
+  music, "Stop after the wake word ends listening") is not shown, and takes what was showing away. Experimental.
+  Thanks to taucher4000, who wrote it and tried it on an Echo Show 5 2nd gen.
+- **Echo Show: timers on the screen.** "Timers on screen" (next to it, off by default) counts running timers down in
+  large digits with their unit ("4:59 min", "1:02:05 h", "45 s") and a bar of what is left, and shows a ringing one in
+  orange, pulsing until it is stopped, with a Stop button. The screen stays on while a timer runs.
+- **Echo Show: words and timers by touch.** A tap takes the words away, hides the timers until the next change, and
+  Stop stops a ringing timer, over an app too: while they show, the app gets none of those touches.
+- **A settings file from before the sounds had their own switches keeps the Echo as quiet as it was.** In a file
+  exported before then (its first line names a version older than 2026.11.02), "Wake sound" off also stood for the
+  action button, microphone and volume sounds. Imported on the settings page or given to `scripts/setup.sh --preset`,
+  it turned only the wake sound off; now those sounds go off with it, as they already did for an Echo that had it off
+  when it updated. Bluetooth's sounds stay on: that switch never covered them.
+
+## 2026-11-08
+
+- **Wake word in Home Assistant: answering a question now works.** When the assistant asked something back
+  ("which light?"), the Echo opened the microphone but asked Home Assistant to wait for a wake word first, so the
+  answer was ignored. A follow-up question now goes without that wait, as with the Echo's own wake word, and the
+  Echo shows it is listening. The same for the action button while a reply plays: what is said after it is the
+  request.
+
 ## 2026-11-07
+
+- **Echo Shows: screen brightness as on a stock Echo Show (issue #126).** The screen's brightness is now a setting,
+  on the settings page's Screen page and in Home Assistant: **Screen brightness** (one level, 47 % by default, what the
+  Shows ran at before), or **Adaptive brightness**, Amazon's own following of the room's light, with **Adaptive
+  brightness adjustment** to make it brighter or dimmer, as the slider on a stock Echo Show does. The face no longer
+  dims on top of that in a dim room: it was at half brightness most of the day where the light sensor reads low.
+  With Kiosk Satellite installed, the Echo switches off the app's own adaptive brightness, which kept overriding these
+  settings: the app restarts once for it.
+
+- **Setup on an Echo Dot 3: a clearer hint when TWRP does not come up.** If TWRP (the white ring) is not there a
+  minute after the unlock flashed it, or after any later restart into it, the setup now says to unplug the power and
+  hold only Volume up (+) while plugging it back in, which starts TWRP. It used to say only to replug the power, which
+  can start the Echo's own software instead.
+
+- **Echo Show 5 (1st gen): the wake sound right away after a pause.** After a few seconds of quiet, the Echo Shows waited 0.35 s
+  before every sound, because the Echo Show 8's speaker swallowed the start of the first one while it switched on.
+  Measured on an Echo Show 5 1st gen, it loses nothing, so it now plays at once. The other Shows keep the wait until someone
+  measures theirs (issue #75).
 
 - **Setup: fewer dead ends on an Echo Show (issue #132).** When the unlock does not take and the Echo starts its own
   software again, the setup now says so and offers to run the step again, instead of waiting for TWRP forever. It
